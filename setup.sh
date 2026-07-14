@@ -105,10 +105,10 @@ echo "==> Installing systemd unit: $UNIT_PATH"
 cat > "$UNIT_PATH" <<UNIT
 [Unit]
 Description=VESYL Print — LCD system info display
-# Start early so the boot splash appears as soon as the LCD (fb1) is ready.
-# The app waits for fb1 and for the network itself (showing the splash), so
-# no network-online ordering is needed here.
-After=local-fs.target
+# Wait until Plymouth has quit before painting, so the app doesn't fight the
+# boot splash over the LCD (which causes flicker). Clean hand-off: splash
+# through boot, then the app takes over.
+After=plymouth-quit-wait.service
 
 [Service]
 Type=simple

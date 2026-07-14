@@ -1,9 +1,11 @@
 [Unit]
 Description=VESYL Print — LCD system info display
-# Start early so the boot splash appears as soon as the LCD (fb1) is ready.
-# The app waits for fb1 and for the network itself (showing the splash), so
-# no network-online ordering is needed here.
-After=local-fs.target
+# Wait until Plymouth has quit before painting. Plymouth owns the LCD during
+# boot (showing the VESYL splash) and repaints it periodically; if the app
+# starts while Plymouth is still up, the two fight over fb1 and the screen
+# flickers between the splash and the live view. Ordering after plymouth-quit
+# gives a clean hand-off: splash through boot, then the app takes over.
+After=plymouth-quit-wait.service
 
 [Service]
 Type=simple
