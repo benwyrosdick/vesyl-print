@@ -166,7 +166,11 @@ def main() -> None:
     )
     args = ap.parse_args()
 
-    fb = open_framebuffer(args.device, wait=15.0 if args.boot else 0.0)
+    # The LCD's SPI driver loads late in boot (fb1 appears ~15-20s in), so the
+    # service can start before the device exists — wait for it. Manual one-shot
+    # modes fail fast instead of hanging.
+    manual = args.once or args.offline
+    fb = open_framebuffer(args.device, wait=0.0 if manual else 30.0)
     screen = InfoScreen(fb)
 
     if args.offline:
@@ -178,9 +182,7 @@ def main() -> None:
     signal.signal(signal.SIGTERM, lambda *_: running.update(go=False))
 
     if args.boot:
-        # Runs from early boot until the app service supersedes it. Exit
-        # cleanly on signal WITHOUT painting the offline screen — the app is
-        # about to take over the display.
+        # Preview the boot splash on its own (loops until stopped).
         frame = 0
         while running["go"]:
             fb.show(screen.render_boot(sysinfo.booting_units(), frame))
@@ -193,6 +195,7 @@ def main() -> None:
         return
 
     try:
+        boot_splash(fb, screen, running)
         while running["go"]:
             start = time.monotonic()
             fb.show(screen.render())
@@ -206,6 +209,25 @@ def main() -> None:
             fb.show(screen.render_offline())
         except Exception:
             pass
+
+
+def boot_splash(fb, screen, running, timeout: float = 60.0) -> None:
+    """Show the booting splash until the network is up (or we give up).
+
+    This is the first thing painted once fb1 exists, so it replaces whatever
+    the LCD showed during boot. It lists services as they start and hands off
+    to the live info screen once an IP is assigned.
+    """
+    deadline = time.monotonic() + timeout
+    frame = 0
+    while (
+        running["go"]
+        and not sysinfo.ip_addresses()
+        and time.monotonic() < deadline
+    ):
+        fb.show(screen.render_boot(sysinfo.booting_units(), frame))
+        frame += 1
+        time.sleep(0.5)
 
 
 if __name__ == "__main__":

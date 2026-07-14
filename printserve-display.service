@@ -1,9 +1,9 @@
 [Unit]
 Description=VESYL Print — LCD system info display
-After=network-online.target printserve-boot.service
-Wants=network-online.target
-# Starting the app supersedes the boot splash (Conflicts stops it).
-Conflicts=printserve-boot.service
+# Start early so the boot splash appears as soon as the LCD (fb1) is ready.
+# The app waits for fb1 and for the network itself (showing the splash), so
+# no network-online ordering is needed here.
+After=local-fs.target
 
 [Service]
 Type=simple

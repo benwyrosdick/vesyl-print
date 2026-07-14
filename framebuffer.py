@@ -55,7 +55,7 @@ class Framebuffer:
 
         arr = np.asarray(image, dtype=np.uint16)  # (h, w, 3)
         r = (arr[:, :, 0] >> 3) & 0x1F
-        g = (arr[:, :, 2 - 1] >> 2) & 0x3F
+        g = (arr[:, :, 1] >> 2) & 0x3F
         b = (arr[:, :, 2] >> 3) & 0x1F
         rgb565 = (r << 11) | (g << 5) | b  # (h, w) uint16
 
