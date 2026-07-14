@@ -79,6 +79,27 @@ echo "==> Ensuring SPI + mhs35 overlay in $CONFIG_TXT"
 ensure_line "dtparam=spi=on"
 ensure_line "dtoverlay=mhs35:rotate=90"
 
+# --- 3b. boot splash (replace the Raspberry Pi Plymouth splash) ------------
+# The LCD's SPI driver loads ~15-20s into boot; until then the panel can't
+# show anything. Once it appears, Plymouth's splash is what's on screen until
+# the app starts, so we swap in a VESYL splash. Plymouth caches theme assets
+# from the initramfs, so the image change only takes effect after rebuilding.
+PIX_THEME=/usr/share/plymouth/themes/pix
+if [[ -d "$PIX_THEME" && -f "$REPO_DIR/assets/plymouth-splash.png" ]]; then
+    if ! cmp -s "$REPO_DIR/assets/plymouth-splash.png" "$PIX_THEME/splash.png"; then
+        echo "==> Installing VESYL Plymouth splash"
+        [[ -f "$PIX_THEME/splash.png.rpi-orig" ]] || \
+            cp "$PIX_THEME/splash.png" "$PIX_THEME/splash.png.rpi-orig"
+        cp "$REPO_DIR/assets/plymouth-splash.png" "$PIX_THEME/splash.png"
+        echo "   Rebuilding initramfs so Plymouth picks it up (~1-2 min)..."
+        update-initramfs -u
+    else
+        echo "==> VESYL Plymouth splash already installed"
+    fi
+else
+    echo "==> Skipping splash (pix theme or splash asset not found)"
+fi
+
 # --- 4. systemd service ----------------------------------------------------
 echo "==> Installing systemd unit: $UNIT_PATH"
 cat > "$UNIT_PATH" <<UNIT
