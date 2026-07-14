@@ -73,6 +73,22 @@ class InfoScreen:
         self._status(d, "online", OK)
         return img
 
+    def render_boot(self, units: list[str], frame: int = 0) -> Image.Image:
+        """Boot splash: logo, animated 'booting…', starting services listed."""
+        img, d = self._new()
+        self._header(img, d, accent=ACCENT)
+
+        dots = "." * (1 + frame % 3)
+        self._centered(d, "booting" + dots, self.f_head, y=128, fill=FG)
+
+        # currently-starting services, stacked up from the bottom-left corner
+        y = self.h - 24
+        for name in units:
+            text = name if len(name) <= 42 else name[:41] + "…"
+            d.text((16, y), text, font=self.f_footer, fill=MUTED)
+            y -= 20
+        return img
+
     def render_offline(self, message: str = "display service stopped") -> Image.Image:
         """Static screen shown when the refresh loop is not running."""
         img, d = self._new()
@@ -115,6 +131,22 @@ class InfoScreen:
         d.text((16, y + 22), value, font=self.f_value, fill=FG)
 
 
+def open_framebuffer(device: str, wait: float = 0.0) -> Framebuffer:
+    """Open the framebuffer, optionally retrying until it appears.
+
+    During early boot the splash can start before the kernel has created
+    /dev/fb1, so wait up to `wait` seconds for it.
+    """
+    deadline = time.monotonic() + wait
+    while True:
+        try:
+            return Framebuffer(device)
+        except (OSError, RuntimeError):
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(0.5)
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--device", default="/dev/fb1")
@@ -127,9 +159,14 @@ def main() -> None:
         action="store_true",
         help="render the static disconnected screen once and exit",
     )
+    ap.add_argument(
+        "--boot",
+        action="store_true",
+        help="show the boot splash (logo + starting services) until stopped",
+    )
     args = ap.parse_args()
 
-    fb = Framebuffer(args.device)
+    fb = open_framebuffer(args.device, wait=15.0 if args.boot else 0.0)
     screen = InfoScreen(fb)
 
     if args.offline:
@@ -139,6 +176,17 @@ def main() -> None:
     running = {"go": True}
     signal.signal(signal.SIGINT, lambda *_: running.update(go=False))
     signal.signal(signal.SIGTERM, lambda *_: running.update(go=False))
+
+    if args.boot:
+        # Runs from early boot until the app service supersedes it. Exit
+        # cleanly on signal WITHOUT painting the offline screen — the app is
+        # about to take over the display.
+        frame = 0
+        while running["go"]:
+            fb.show(screen.render_boot(sysinfo.booting_units(), frame))
+            frame += 1
+            time.sleep(0.5)
+        return
 
     if args.once:
         fb.show(screen.render())
