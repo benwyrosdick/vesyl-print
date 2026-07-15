@@ -7,7 +7,7 @@ import logging
 import urllib.error
 import urllib.request
 from typing import Any
-from urllib.parse import urljoin
+from urllib.parse import quote, urljoin
 
 log = logging.getLogger("vesyl-print.cloud")
 
@@ -36,6 +36,10 @@ class CloudError(Exception):
     @property
     def service_disabled(self) -> bool:
         return self.status == 503
+
+    @property
+    def not_found(self) -> bool:
+        return self.status == 404
 
 
 def _parse_error_body(raw: bytes, status: int) -> CloudError:
@@ -182,3 +186,42 @@ class CloudClient:
 
     def ws_ticket(self, device_token: str) -> dict[str, Any]:
         return self._request("POST", "print/v1/ws_ticket", body={}, token=device_token)
+
+    # --- jobs (pull path; production until ActionCable push) ----------------
+
+    def pending_jobs(self, device_token: str) -> list[dict[str, Any]]:
+        """GET /print/v1/jobs/pending — eligible jobs, marked sent server-side.
+
+        Returns a list of job payloads (JobSerializer.for_node shape).
+        """
+        data = self._request("GET", "print/v1/jobs/pending", token=device_token)
+        jobs = data.get("jobs")
+        if jobs is None:
+            return []
+        if not isinstance(jobs, list):
+            raise CloudError("jobs/pending: expected jobs array", status=200, body=data)
+        out: list[dict[str, Any]] = []
+        for item in jobs:
+            if isinstance(item, dict):
+                out.append(item)
+        return out
+
+    def ack_job(self, device_token: str, job_id: str) -> dict[str, Any]:
+        """POST /print/v1/jobs/:id/ack — durable receive ACK (after queue fsync)."""
+        path = f"print/v1/jobs/{quote(str(job_id), safe='')}/ack"
+        return self._request("POST", path, body={}, token=device_token)
+
+    def report_job_state(
+        self,
+        device_token: str,
+        job_id: str,
+        state: str,
+        *,
+        message: str | None = None,
+    ) -> dict[str, Any]:
+        """POST /print/v1/jobs/:id/state — agent may only send done|error."""
+        path = f"print/v1/jobs/{quote(str(job_id), safe='')}/state"
+        body: dict[str, Any] = {"state": state}
+        if message is not None:
+            body["message"] = message
+        return self._request("POST", path, body=body, token=device_token)

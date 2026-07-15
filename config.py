@@ -78,7 +78,8 @@ class Config:
     cable_url: str = ""
     heartbeat_seconds: int = 30
     pull_interval_seconds: int = 5
-    pull_jobs_enabled: bool = False
+    # Phase C: poll GET /print/v1/jobs/pending (disable if server lacks PR4).
+    pull_jobs_enabled: bool = True
     config_dir: Path = field(default_factory=resolve_config_dir)
     state_dir: Path = field(default_factory=resolve_state_dir)
 
@@ -175,7 +176,7 @@ def write_default_config(path: Path | None = None) -> Path:
         "cable_url": cfg.cable_url,
         "heartbeat_seconds": cfg.heartbeat_seconds,
         "pull_interval_seconds": cfg.pull_interval_seconds,
-        "pull_jobs_enabled": False,
+        "pull_jobs_enabled": True,
     }
     out.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
     return out

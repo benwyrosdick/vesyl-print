@@ -10,8 +10,8 @@ Raspberry Pi **print node** for VESYL: LCD status display, CUPS printer discover
 | **Agent** (`agent.py` / `vesyl-print-agent.service`) | Heartbeats + `whoami`; writes status for the LCD |
 | **CLI** (`vesyl-print`) | `claim`, `enroll`, `status`, `unpair` |
 
-**Local print (Phase B)** is implemented: durable queue, PDF/PNG/JPEG via CUPS, startup drain.
-Cloud **job pull** stays off (`pull_jobs_enabled: false`) until wms-api PR4.
+**Local print (Phase B)** + **cloud job pull (Phase C)** are implemented.
+Set `pull_jobs_enabled: true` (default) to poll `GET /print/v1/jobs/pending`.
 
 ## Hardware
 
@@ -38,9 +38,25 @@ This installs dependencies, display overlay, config dirs, CLI, and both systemd 
   "cable_url": "wss://wms.api.staging.vesyl.com/print/cable",
   "heartbeat_seconds": 30,
   "pull_interval_seconds": 5,
-  "pull_jobs_enabled": false
+  "pull_jobs_enabled": true
 }
 ```
+
+| Key | Meaning |
+|-----|---------|
+| `heartbeat_seconds` | `POST /print/v1/heartbeat` interval |
+| `pull_interval_seconds` | How often to poll `GET /print/v1/jobs/pending` |
+| `pull_jobs_enabled` | When `true`, pull + ack + state after durable queue write |
+
+Job pull flow (at-least-once):
+
+1. `GET /print/v1/jobs/pending` → job payloads  
+2. Write `queue/<id>.json` (fsync)  
+3. `POST /print/v1/jobs/:id/ack`  
+4. Fetch/decode content → `lp`  
+5. `POST /print/v1/jobs/:id/state` with `done` or `error`  
+
+404/503 on pending backs off pulls without stopping heartbeats.
 
 | Topology | `api_base_url` |
 |----------|----------------|
@@ -180,8 +196,7 @@ printers.py    # CUPS discovery + inventory_payload()
 
 ## Non-goals (this phase)
 
-- Cloud job pull / ack / state REST (Phase C — `pull_jobs_enabled`)
-- ActionCable push (Phase D)
+- ActionCable push (Phase D — keep pull as safety net)
 - ZPL/EPL raw thermal (`raw_*` content types rejected for now)
 - GPIO claim keypad
 - Label generation on the Pi

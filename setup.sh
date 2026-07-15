@@ -117,7 +117,7 @@ if [[ ! -f /etc/vesyl-print/config.json ]]; then
   "cable_url": "wss://wms.api.staging.vesyl.com/print/cable",
   "heartbeat_seconds": 30,
   "pull_interval_seconds": 5,
-  "pull_jobs_enabled": false
+  "pull_jobs_enabled": true
 }
 CFG
     chown "$RUN_USER:$RUN_GROUP" /etc/vesyl-print/config.json

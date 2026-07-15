@@ -119,12 +119,17 @@ AckFn = Callable[[PrintJob], None]
 StateFn = Callable[[PrintJob, str, str | None], None]
 
 
-def _noop_ack(_job: PrintJob) -> None:
+def noop_ack(_job: PrintJob) -> None:
     return None
 
 
-def _noop_state(_job: PrintJob, _state: str, _detail: str | None = None) -> None:
+def noop_state(_job: PrintJob, _state: str, _detail: str | None = None) -> None:
     return None
+
+
+# Back-compat aliases
+_noop_ack = noop_ack
+_noop_state = noop_state
 
 
 class LpRunner(Protocol):
@@ -339,8 +344,8 @@ def process_job(
     store: JobStore,
     *,
     lp: LpRunner = default_lp,
-    ack: AckFn = _noop_ack,
-    report_state: StateFn = _noop_state,
+    ack: AckFn = noop_ack,
+    report_state: StateFn = noop_state,
     fetch_url: Callable[[str], bytes] | None = None,
     work_dir: Path | None = None,
 ) -> str:
@@ -429,8 +434,8 @@ def drain_queue(
     store: JobStore,
     *,
     lp: LpRunner = default_lp,
-    ack: AckFn = _noop_ack,
-    report_state: StateFn = _noop_state,
+    ack: AckFn = noop_ack,
+    report_state: StateFn = noop_state,
     fetch_url: Callable[[str], bytes] | None = None,
 ) -> list[tuple[str, str]]:
     """Process every queue/*.json (crash recovery). Returns [(job_id, result)]."""
@@ -465,8 +470,8 @@ def receive_job(
     store: JobStore,
     *,
     lp: LpRunner = default_lp,
-    ack: AckFn = _noop_ack,
-    report_state: StateFn = _noop_state,
+    ack: AckFn = noop_ack,
+    report_state: StateFn = noop_state,
     fetch_url: Callable[[str], bytes] | None = None,
 ) -> str:
     """Entry point for a newly delivered job (pull/push later)."""
