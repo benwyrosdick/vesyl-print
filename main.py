@@ -1,7 +1,7 @@
 """VESYL print device — system info display.
 
-Renders time, hostname and IP address to the 3.5" LCD (/dev/fb1) and
-refreshes once a second. Run with:  python3 main.py
+Renders time, hostname, IP address and CPU temp to the 3.5" LCD (/dev/fb1)
+and refreshes once a second. Run with:  python3 main.py
 """
 
 from __future__ import annotations
@@ -61,20 +61,23 @@ class InfoScreen:
         return logo.resize((LOGO_WIDTH, h), Image.LANCZOS)
 
     def render(self) -> Image.Image:
-        """Live screen: clock, hostname, IP and an 'online' status."""
+        """Live screen: clock, hostname, IP, CPU temp and an 'online' status."""
         img, d = self._new()
         self._header(img, d, accent=ACCENT)
 
         now = sysinfo.now()
-        self._centered(d, now.strftime("%H:%M:%S"), self.f_clock, y=96, fill=FG)
+        # Vertical stack is tight on the 480×320 panel; keep rows compact so
+        # hostname, IP and CPU temp all fit above the footer.
+        self._centered(d, now.strftime("%H:%M:%S"), self.f_clock, y=88, fill=FG)
         self._centered(
-            d, now.strftime("%A, %d %B %Y"), self.f_footer, y=162, fill=MUTED
+            d, now.strftime("%A, %d %B %Y"), self.f_footer, y=150, fill=MUTED
         )
-        self._row(d, "HOSTNAME", sysinfo.hostname(), y=200)
-        self._row(d, "IP ADDRESS", sysinfo.primary_ip(), y=252)
+        self._row(d, "HOSTNAME", sysinfo.hostname(), y=180)
+        self._row(d, "IP ADDRESS", sysinfo.primary_ip(), y=224)
+        self._row(d, "CPU TEMP", sysinfo.cpu_temp_c(), y=268)
 
         # printer name, right-aligned just above the online status; truncated
-        # to the right of the IP value so the two never collide
+        # so it stays clear of the left-aligned CPU value
         if self.printer_name:
             name = self._fit(d, self.printer_name, self.f_footer, self.w - 120)
             tw = d.textlength(name, font=self.f_footer)
