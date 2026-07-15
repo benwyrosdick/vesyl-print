@@ -60,7 +60,7 @@ def cmd_claim(args: argparse.Namespace) -> int:
             node_id=creds.node_id,
             name=creds.name,
             organization_name=creds.organization_name,
-            warehouse_name=creds.warehouse_name,
+            warehouse_name=creds.warehouse_label(),
             agent_version=AGENT_VERSION,
         ),
     )
@@ -70,7 +70,7 @@ def cmd_claim(args: argparse.Namespace) -> int:
     print(f"  node_id:      {creds.node_id}")
     print(f"  name:         {creds.name or '—'}")
     print(f"  organization: {creds.organization_name or '—'}")
-    print(f"  warehouse:    {creds.warehouse_name or '—'}")
+    print(f"  warehouse:    {creds.warehouse_label()}")
     print(f"  credentials:  {cfg.credentials_path} (mode {oct(mode or 0)})")
     print("  (device_token stored; not shown)")
     print("Restart or wait for vesyl-print-agent to heartbeat.")
@@ -111,14 +111,14 @@ def cmd_enroll(args: argparse.Namespace) -> int:
             node_id=creds.node_id,
             name=creds.name,
             organization_name=creds.organization_name,
-            warehouse_name=creds.warehouse_name,
+            warehouse_name=creds.warehouse_label(),
             agent_version=AGENT_VERSION,
         ),
     )
     print("Enrolled successfully.")
     print(f"  node_id:      {creds.node_id}")
     print(f"  organization: {creds.organization_name or '—'}")
-    print(f"  warehouse:    {creds.warehouse_name or '—'}")
+    print(f"  warehouse:    {creds.warehouse_label()}")
     print(f"  credentials:  {cfg.credentials_path}")
     print("  (device_token stored; not shown)")
     return 0
@@ -153,7 +153,7 @@ def cmd_status(args: argparse.Namespace) -> int:
     print(f"node_id:       {creds.node_id}")
     print(f"name:          {creds.name or '—'}")
     print(f"organization:  {creds.organization_name or '—'}")
-    print(f"warehouse:     {creds.warehouse_name or '—'}")
+    print(f"warehouse:     {creds.warehouse_label()}")
     mode = auth.credentials_mode(cfg.credentials_path)
     print(f"cred mode:     {oct(mode) if mode is not None else '—'}")
 

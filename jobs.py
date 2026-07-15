@@ -264,6 +264,33 @@ def _utc_marker() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat() + "\n"
 
 
+def sniff_suffix(data: bytes) -> str | None:
+    """Detect file type from magic bytes (overrides wrong content_type labels)."""
+    if data.startswith(b"%PDF"):
+        return ".pdf"
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return ".png"
+    if len(data) >= 3 and data[:3] == b"\xff\xd8\xff":
+        return ".jpg"
+    return None
+
+
+def _write_temp_content(work_dir: Path, job_id: str, declared_suffix: str, data: bytes) -> Path:
+    """Write bytes and rename to sniffed type so CUPS filters see the real format."""
+    real = sniff_suffix(data)
+    suffix = real or declared_suffix or ".bin"
+    if real and declared_suffix and real != declared_suffix:
+        log.warning(
+            "job %s content magic is %s but content_type implied %s — using magic",
+            job_id,
+            real,
+            declared_suffix,
+        )
+    out = work_dir / f"{job_id}{suffix}"
+    out.write_bytes(data)
+    return out
+
+
 def materialize_content(
     job: PrintJob,
     *,
@@ -273,6 +300,8 @@ def materialize_content(
     """Return (path, is_temp). Caller must delete temp files when is_temp.
 
     Supports pdf/png/jpeg uri|base64 and local_path. raw_* raises JobError.
+    File extension is corrected from magic bytes when content_type disagrees
+    (e.g. pdf_uri that actually returns a PNG label).
     """
     ctype = job.content_type
     if ctype in _RAW_TYPES:
@@ -294,8 +323,7 @@ def materialize_content(
     else:
         work_dir.mkdir(parents=True, exist_ok=True)
 
-    suffix = _SUFFIX.get(ctype) or ".bin"
-    out = work_dir / f"{job.id}{suffix}"
+    declared = _SUFFIX.get(ctype) or ".bin"
 
     if ctype.endswith("_base64"):
         try:
@@ -308,8 +336,7 @@ def materialize_content(
             raise JobError(f"invalid base64 content: {e}", code="content_bad") from e
         if not data:
             raise JobError("empty base64 content", code="content_bad")
-        out.write_bytes(data)
-        return out, True
+        return _write_temp_content(work_dir, job.id, declared, data), True
 
     # *_uri
     fetcher = fetch_url or _http_get
@@ -319,8 +346,7 @@ def materialize_content(
         raise JobError(f"fetch failed: {e}", code="content_fetch") from e
     if not data:
         raise JobError("empty content from uri", code="content_bad")
-    out.write_bytes(data)
-    return out, True
+    return _write_temp_content(work_dir, job.id, declared, data), True
 
 
 def _http_get(url: str, timeout: float = 60.0) -> bytes:

@@ -46,7 +46,8 @@ def _status_from_creds(
         st.node_id = creds.node_id
         st.name = creds.name
         st.organization_name = creds.organization_name
-        st.warehouse_name = creds.warehouse_name
+        # Multi-warehouse: comma-separated codes; single: name (see Credentials.warehouse_label).
+        st.warehouse_name = creds.warehouse_label()
     return st
 
 

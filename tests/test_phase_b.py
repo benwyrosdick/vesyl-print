@@ -194,6 +194,23 @@ class TestContent(unittest.TestCase):
             jobs.materialize_content(job)
         self.assertEqual(cm.exception.code, "unsupported_content")
 
+    def test_sniff_overrides_wrong_pdf_label_for_png(self):
+        """Server labeled pdf_* but payload is PNG — CUPS needs .png extension."""
+        png = base64.b64decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+        )
+        job = PrintJob(
+            id="mislabel",
+            cups_name="P",
+            content_type="pdf_base64",
+            content=base64.b64encode(png).decode(),
+        )
+        with tempfile.TemporaryDirectory() as td:
+            path, is_temp = jobs.materialize_content(job, work_dir=Path(td))
+            self.assertTrue(is_temp)
+            self.assertEqual(path.suffix, ".png")
+            self.assertEqual(path.read_bytes(), png)
+
 
 class TestReceiveIdempotent(unittest.TestCase):
     def test_double_receive_prints_once(self):

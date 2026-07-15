@@ -52,8 +52,36 @@ class TestCredentials(unittest.TestCase):
         self.assertEqual(creds.organization_name, "Acme Corp")
         self.assertEqual(creds.warehouse_name, "Main Warehouse")
         self.assertEqual(creds.warehouse_code, "MAIN")
+        self.assertEqual(creds.warehouse_label(), "Main Warehouse")
         pub = creds.public_dict()
         self.assertNotIn("device_token", pub)
+
+    def test_multiple_warehouses_label_uses_codes(self):
+        data = {
+            **CLAIM_RESPONSE,
+            "warehouses": [
+                {"id": "w1", "name": "Desert Fulfillment Depot", "code": "DFD"},
+                {"id": "w2", "name": "Main Warehouse", "code": "MAIN"},
+            ],
+        }
+        # Drop singular warehouse so list is the source of truth
+        data.pop("warehouse", None)
+        creds = auth.credentials_from_pair_response(data)
+        self.assertEqual(len(creds.warehouses or []), 2)
+        self.assertEqual(creds.warehouse_code, "DFD")  # primary = first
+        self.assertEqual(creds.warehouse_label(), "DFD, MAIN")
+
+    def test_warehouses_array_preferred_over_singular(self):
+        data = {
+            **CLAIM_RESPONSE,
+            "warehouse": {"id": "old", "name": "Legacy", "code": "LEG"},
+            "warehouses": [
+                {"id": "w1", "name": "A", "code": "AAA"},
+                {"id": "w2", "name": "B", "code": "BBB"},
+            ],
+        }
+        creds = auth.credentials_from_pair_response(data)
+        self.assertEqual(creds.warehouse_label(), "AAA, BBB")
 
     def test_save_mode_0600(self):
         with tempfile.TemporaryDirectory() as td:

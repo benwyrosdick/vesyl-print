@@ -22,6 +22,9 @@ class Credentials:
     warehouse_id: str | None = None
     warehouse_name: str | None = None
     warehouse_code: str | None = None
+    # Full list from claim/whoami when the node serves multiple warehouses.
+    # Each item: {"id", "name", "code"} (any key may be missing).
+    warehouses: list[dict[str, str | None]] | None = None
 
     def public_dict(self) -> dict[str, Any]:
         """Safe for status/CLI — never includes device_token."""
@@ -32,7 +35,35 @@ class Credentials:
             "organization_name": self.organization_name,
             "warehouse_name": self.warehouse_name,
             "warehouse_code": self.warehouse_code,
+            "warehouses": self.warehouses,
+            "warehouse_label": self.warehouse_label(),
         }
+
+    def warehouse_label(self) -> str:
+        """LCD / status text for warehouse(s).
+
+        - Multiple warehouses with codes → comma-separated codes (e.g. \"DFD, MAIN\")
+        - Otherwise prefer the primary name, then code.
+        """
+        items = self.warehouses or []
+        codes = [
+            str(w["code"]).strip()
+            for w in items
+            if w.get("code") and str(w["code"]).strip()
+        ]
+        if len(items) > 1 and len(codes) > 1:
+            return ", ".join(codes)
+        if len(items) > 1 and codes:
+            # Multiple warehouses but only some have codes — still prefer codes.
+            return ", ".join(codes)
+        if self.warehouse_name:
+            return self.warehouse_name
+        if self.warehouse_code:
+            return self.warehouse_code
+        if items:
+            w0 = items[0]
+            return (w0.get("name") or w0.get("code") or "—") or "—"
+        return "—"
 
 
 def _nested_name(obj: Any, *keys: str) -> str | None:
@@ -48,17 +79,51 @@ def _nested_name(obj: Any, *keys: str) -> str | None:
     return str(cur)
 
 
+def _parse_warehouses(data: dict[str, Any]) -> list[dict[str, str | None]]:
+    """Accept warehouses[] and/or legacy single warehouse object."""
+    out: list[dict[str, str | None]] = []
+    raw_list = data.get("warehouses")
+    if isinstance(raw_list, list):
+        for item in raw_list:
+            if not isinstance(item, dict):
+                continue
+            out.append(
+                {
+                    "id": str(item["id"]) if item.get("id") is not None else None,
+                    "name": str(item["name"]) if item.get("name") is not None else None,
+                    "code": str(item["code"]) if item.get("code") is not None else None,
+                }
+            )
+    if out:
+        return out
+    wh = data.get("warehouse")
+    if isinstance(wh, dict) and (wh.get("id") or wh.get("name") or wh.get("code")):
+        return [
+            {
+                "id": str(wh["id"]) if wh.get("id") is not None else None,
+                "name": str(wh["name"]) if wh.get("name") is not None else None,
+                "code": str(wh["code"]) if wh.get("code") is not None else None,
+            }
+        ]
+    return []
+
+
 def credentials_from_pair_response(data: dict[str, Any]) -> Credentials:
     """Parse claim/enroll/whoami JSON into Credentials.
 
     claim/enroll include device_token; whoami does not (caller keeps existing).
+
+    Warehouse payload (either form):
+      "warehouse":  { "id", "name", "code" }
+      "warehouses": [ { "id", "name", "code" }, ... ]
     """
     node_id = data.get("node_id") or data.get("id")
     if not node_id:
         raise ValueError("pair response missing node_id")
     token = data.get("device_token") or ""
     org = data.get("organization") if isinstance(data.get("organization"), dict) else {}
-    wh = data.get("warehouse") if isinstance(data.get("warehouse"), dict) else {}
+    warehouses = _parse_warehouses(data)
+    primary = warehouses[0] if warehouses else {}
     return Credentials(
         node_id=str(node_id),
         device_token=str(token) if token else "",
@@ -67,9 +132,10 @@ def credentials_from_pair_response(data: dict[str, Any]) -> Credentials:
         organization_id=_nested_name(org, "id"),
         organization_name=_nested_name(org, "name"),
         organization_slug=_nested_name(org, "slug"),
-        warehouse_id=_nested_name(wh, "id"),
-        warehouse_name=_nested_name(wh, "name"),
-        warehouse_code=_nested_name(wh, "code"),
+        warehouse_id=primary.get("id"),
+        warehouse_name=primary.get("name"),
+        warehouse_code=primary.get("code"),
+        warehouses=warehouses or None,
     )
 
 
@@ -94,6 +160,19 @@ def load_credentials(path: Path) -> Credentials | None:
     token = data.get("device_token")
     if not node_id or not token:
         return None
+    warehouses = data.get("warehouses")
+    if not isinstance(warehouses, list):
+        warehouses = None
+    else:
+        warehouses = [
+            {
+                "id": w.get("id"),
+                "name": w.get("name"),
+                "code": w.get("code"),
+            }
+            for w in warehouses
+            if isinstance(w, dict)
+        ] or None
     return Credentials(
         node_id=str(node_id),
         device_token=str(token),
@@ -105,6 +184,7 @@ def load_credentials(path: Path) -> Credentials | None:
         warehouse_id=data.get("warehouse_id"),
         warehouse_name=data.get("warehouse_name"),
         warehouse_code=data.get("warehouse_code"),
+        warehouses=warehouses,
     )
 
 
