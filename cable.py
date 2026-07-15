@@ -280,6 +280,7 @@ class PrintCableSession:
         on_print_job: MessageHandler,
         on_revoke: EventHandler | None = None,
         on_job_canceled: Callable[[str], None] | None = None,
+        on_node_config: MessageHandler | None = None,
         on_subscribed: EventHandler | None = None,
         on_disconnected: EventHandler | None = None,
     ):
@@ -288,6 +289,7 @@ class PrintCableSession:
         self._on_print_job = on_print_job
         self._on_revoke = on_revoke
         self._on_job_canceled = on_job_canceled
+        self._on_node_config = on_node_config
         self._on_subscribed = on_subscribed
         self._on_disconnected = on_disconnected
         self._client: ActionCableClient | None = None
@@ -381,6 +383,13 @@ class PrintCableSession:
             log.warning("cable: revoke received")
             if self._on_revoke:
                 self._on_revoke()
+        elif typ == "node_config":
+            # Warehouse/name push so LCD matches admin without waiting for whoami.
+            if self._on_node_config:
+                try:
+                    self._on_node_config(msg)
+                except Exception:
+                    log.exception("node_config handler failed")
         elif typ == "error":
             log.warning(
                 "cable error from server: %s %s",

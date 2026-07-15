@@ -125,6 +125,25 @@ class TestPrintCableSessionDispatch(unittest.TestCase):
         sess._dispatch_message(_load_fixture("revoke.json")["message"])
         self.assertTrue(revoked)
 
+    def test_node_config(self):
+        configs: list[dict] = []
+        sess = cable.PrintCableSession(
+            cable_url="wss://example/print/cable",
+            get_ticket=lambda: {"ticket": "t"},
+            on_print_job=lambda j: None,
+            on_node_config=lambda m: configs.append(m),
+        )
+        sess._dispatch_message(
+            {
+                "type": "node_config",
+                "node_id": "n1",
+                "name": "Pack 1",
+                "warehouses": [{"id": "w1", "name": "Main", "code": "MAIN"}],
+            }
+        )
+        self.assertEqual(len(configs), 1)
+        self.assertEqual(configs[0]["name"], "Pack 1")
+
     def test_job_canceled(self):
         canceled: list[str] = []
         sess = cable.PrintCableSession(

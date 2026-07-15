@@ -329,6 +329,42 @@ def run_agent(cfg: Config | None = None) -> None:
         except Exception:
             log.exception("job_canceled handler failed")
 
+    def apply_node_config(msg: dict[str, Any]) -> None:
+        """Apply ActionCable node_config (warehouses/name) to creds + LCD status."""
+        creds_now = auth.load_credentials(cfg.credentials_path)
+        if not creds_now:
+            return
+        try:
+            updated = auth.merge_whoami(creds_now, msg)
+            auth.save_credentials(cfg.credentials_path, updated)
+            st = _status_from_creds(
+                updated,
+                pairing="paired",
+                cloud="online",
+            )
+            prev = statusio.read_status(cfg.status_path)
+            if prev and prev.last_heartbeat_at:
+                st.last_heartbeat_at = prev.last_heartbeat_at
+            statusio.write_status(cfg.status_path, st)
+            log.info(
+                "node_config applied warehouses=%s name=%s",
+                updated.warehouse_label(),
+                updated.name,
+            )
+        except Exception:
+            log.exception("failed to apply node_config")
+
+    def report_printers_now(sess: cable.PrintCableSession) -> None:
+        """Push CUPS inventory over the cable so admin sees printers promptly."""
+        try:
+            inv = printers.inventory_payload()
+        except Exception:
+            log.debug("printer inventory unavailable", exc_info=True)
+            return
+        if inv is None:
+            return
+        sess.perform("report_printers", printers=inv)
+
     def get_ticket() -> dict[str, Any]:
         creds_now = auth.load_credentials(cfg.credentials_path)
         if not creds_now:
@@ -353,13 +389,20 @@ def run_agent(cfg: Config | None = None) -> None:
                 pass
             cable_session_holder["s"] = None
 
+        def on_subscribed() -> None:
+            log.info("cable PrintNodeChannel ready")
+            s = cable_session_holder["s"]
+            if s:
+                report_printers_now(s)
+
         sess = cable.PrintCableSession(
             cable_url=cfg.cable_url,
             get_ticket=get_ticket,
             on_print_job=on_print_job,
             on_revoke=on_revoke,
             on_job_canceled=on_job_canceled,
-            on_subscribed=lambda: log.info("cable PrintNodeChannel ready"),
+            on_node_config=apply_node_config,
+            on_subscribed=on_subscribed,
             on_disconnected=lambda: log.info("cable disconnected"),
         )
         try:
@@ -381,6 +424,9 @@ def run_agent(cfg: Config | None = None) -> None:
     pull_interval = max(1, int(cfg.pull_interval_seconds))
     # When cable is healthy, pull less often (safety net only).
     pull_interval_when_cabled = max(pull_interval * 6, 30)
+    # Report printers / channel heartbeat more often than REST whoami so admin
+    # inventory stays fresher while WS is up (REST still at hb_interval).
+    cable_hb_interval = max(10, min(hb_interval, 15))
     last_hb = 0.0
     last_pull = 0.0
     last_cable_try = 0.0
@@ -452,8 +498,8 @@ def run_agent(cfg: Config | None = None) -> None:
                         sess = cable_session_holder["s"]
                 elif sess and sess.subscribed:
                     backoff = 1.0
-                    # Channel heartbeat (flush pending) alongside REST.
-                    if (now - last_cable_hb) >= hb_interval:
+                    # Channel heartbeat + printer inventory more often than REST.
+                    if (now - last_cable_hb) >= cable_hb_interval:
                         try:
                             inv = printers.inventory_payload()
                         except Exception:
