@@ -1,14 +1,17 @@
-"""Cloud agent: whoami + heartbeat + optional job pull loop."""
+"""Cloud agent: whoami + heartbeat + job pull + ActionCable push."""
 
 from __future__ import annotations
 
 import logging
+import queue
 import signal
+import threading
 import time
 from datetime import datetime, timezone
-from typing import Callable
+from typing import Any, Callable
 
 import auth
+import cable
 import jobs
 import printers
 import statusio
@@ -57,16 +60,25 @@ def _handle_unauthorized(cfg: Config, creds: auth.Credentials | None) -> None:
 
 
 def cloud_job_hooks(
-    client: CloudClient, device_token: str
+    client: CloudClient,
+    device_token: str,
+    *,
+    cable_session: cable.PrintCableSession | None = None,
 ) -> tuple[Callable[[PrintJob], None], Callable[[PrintJob, str, str | None], None]]:
-    """Build ack / state callbacks that call wms-api after durable receive."""
+    """Build ack / state callbacks — prefer ActionCable when subscribed, else REST."""
 
     def ack(job: PrintJob) -> None:
+        if cable_session and cable_session.perform("ack_job", job_id=job.id):
+            return
         client.ack_job(device_token, job.id)
 
     def report_state(job: PrintJob, state: str, detail: str | None = None) -> None:
         # Server accepts only done|error from agents (not "printing").
         if state not in ("done", "error"):
+            return
+        if cable_session and cable_session.perform(
+            "job_state", job_id=job.id, state=state, message=detail
+        ):
             return
         client.report_job_state(
             device_token, job.id, state, message=detail
@@ -76,7 +88,7 @@ def cloud_job_hooks(
 
 
 def run_once(cfg: Config, client: CloudClient | None = None) -> statusio.AgentStatus:
-    """Single heartbeat cycle: whoami (best-effort) + heartbeat. Updates status file."""
+    """Single REST heartbeat cycle. Updates status file for the LCD."""
     client = client or CloudClient(cfg.api_base_url)
     creds = auth.load_credentials(cfg.credentials_path)
 
@@ -160,6 +172,7 @@ def drain_local_queue(
     *,
     client: CloudClient | None = None,
     device_token: str | None = None,
+    cable_session: cable.PrintCableSession | None = None,
 ) -> None:
     """Crash recovery: finish any jobs left in queue/*.json."""
     store = jobs.store_from_config(cfg)
@@ -171,7 +184,9 @@ def drain_local_queue(
     ack: Callable[[PrintJob], None] = jobs.noop_ack
     report_state: Callable[[PrintJob, str, str | None], None] = jobs.noop_state
     if client is not None and device_token:
-        ack, report_state = cloud_job_hooks(client, device_token)
+        ack, report_state = cloud_job_hooks(
+            client, device_token, cable_session=cable_session
+        )
 
     results = jobs.drain_queue(store, ack=ack, report_state=report_state)
     for job_id, result in results:
@@ -183,15 +198,10 @@ def pull_and_process(
     client: CloudClient,
     device_token: str,
     store: JobStore | None = None,
+    *,
+    cable_session: cable.PrintCableSession | None = None,
 ) -> str:
-    """Pull pending jobs from the cloud and run the durable print pipeline.
-
-    Returns:
-      "ok" — pull succeeded (possibly zero jobs)
-      "unavailable" — 404 (API not shipped) or 503 (service disabled)
-      "unauthorized" — 401
-      "error" — other failure
-    """
+    """Pull pending jobs from the cloud and run the durable print pipeline."""
     store = store or jobs.store_from_config(cfg)
     try:
         payloads = client.pending_jobs(device_token)
@@ -215,7 +225,9 @@ def pull_and_process(
         return "ok"
 
     log.info("pulled %d job(s)", len(payloads))
-    ack, report_state = cloud_job_hooks(client, device_token)
+    ack, report_state = cloud_job_hooks(
+        client, device_token, cable_session=cable_session
+    )
 
     for payload in payloads:
         try:
@@ -238,23 +250,118 @@ def pull_and_process(
     return "ok"
 
 
+def process_job_payload(
+    payload: dict[str, Any],
+    cfg: Config,
+    client: CloudClient,
+    device_token: str,
+    *,
+    cable_session: cable.PrintCableSession | None = None,
+    store: JobStore | None = None,
+) -> None:
+    """Handle one job dict (from pull or ActionCable print_job)."""
+    store = store or jobs.store_from_config(cfg)
+    try:
+        job = PrintJob.from_dict(payload)
+    except JobError as e:
+        log.error("skip invalid job payload: %s", e.message)
+        return
+    ack, report_state = cloud_job_hooks(
+        client, device_token, cable_session=cable_session
+    )
+    try:
+        jobs.receive_job(job, store, ack=ack, report_state=report_state)
+    except JobError as e:
+        log.error("job %s failed: %s", job.id, e.message)
+    except Exception:
+        log.exception("job %s failed unexpectedly", job.id)
+
+
+def handle_job_canceled(job_id: str, store: JobStore) -> None:
+    """Stop local work for a canceled job; do not print if still queued."""
+    if store.is_processed(job_id):
+        store.delete_queue(job_id)
+        return
+    if store.has_queue_file(job_id):
+        log.info("job %s canceled — dropping queue file", job_id)
+        store.delete_queue(job_id)
+    # Marker prevents a late redelivery/print of a canceled job.
+    store.mark_processed(job_id)
+
+
 def run_agent(cfg: Config | None = None) -> None:
-    """Long-running heartbeat + optional job-pull loop with reconnect backoff."""
+    """Long-running agent: REST heartbeat/pull + optional ActionCable push."""
     cfg = cfg or load_config()
     cfg.ensure_dirs()
     client = CloudClient(cfg.api_base_url)
+    store = jobs.store_from_config(cfg)
 
     running = {"go": True}
     signal.signal(signal.SIGINT, lambda *_: running.update(go=False))
     signal.signal(signal.SIGTERM, lambda *_: running.update(go=False))
 
     log.info(
-        "agent starting api_base_url=%s heartbeat=%ss pull_jobs=%s pull_interval=%ss",
+        "agent starting api_base_url=%s cable=%s pull_jobs=%s "
+        "heartbeat=%ss pull_interval=%ss ws_available=%s",
         cfg.api_base_url,
-        cfg.heartbeat_seconds,
+        cfg.cable_enabled,
         cfg.pull_jobs_enabled,
+        cfg.heartbeat_seconds,
         cfg.pull_interval_seconds,
+        cable.websocket_available(),
     )
+
+    # --- ActionCable session (push) ----------------------------------------
+    push_jobs: queue.Queue[dict[str, Any]] = queue.Queue()
+    revoke_flag = threading.Event()
+    cable_session_holder: dict[str, cable.PrintCableSession | None] = {"s": None}
+
+    def on_print_job(job_payload: dict[str, Any]) -> None:
+        push_jobs.put(job_payload)
+
+    def on_revoke() -> None:
+        revoke_flag.set()
+
+    def on_job_canceled(job_id: str) -> None:
+        try:
+            handle_job_canceled(job_id, store)
+        except Exception:
+            log.exception("job_canceled handler failed")
+
+    def get_ticket() -> dict[str, Any]:
+        creds_now = auth.load_credentials(cfg.credentials_path)
+        if not creds_now:
+            raise RuntimeError("no credentials")
+        return client.ws_ticket(creds_now.device_token)
+
+    def ensure_cable(creds: auth.Credentials) -> cable.PrintCableSession | None:
+        if not cfg.cable_enabled or not cable.websocket_available():
+            return None
+        sess = cable_session_holder["s"]
+        if sess and sess.subscribed:
+            return sess
+        if sess and sess.connected and not sess.subscribed:
+            # Still handshaking
+            return sess
+
+        # (Re)connect with a fresh ticket
+        if sess:
+            sess.stop()
+            cable_session_holder["s"] = None
+
+        sess = cable.PrintCableSession(
+            cable_url=cfg.cable_url,
+            get_ticket=get_ticket,
+            on_print_job=on_print_job,
+            on_revoke=on_revoke,
+            on_job_canceled=on_job_canceled,
+            on_subscribed=lambda: log.info("cable PrintNodeChannel ready"),
+            on_disconnected=lambda: log.info("cable disconnected"),
+        )
+        if sess.start():
+            cable_session_holder["s"] = sess
+            return sess
+        return None
 
     creds = auth.load_credentials(cfg.credentials_path)
     token = creds.device_token if creds else None
@@ -265,68 +372,184 @@ def run_agent(cfg: Config | None = None) -> None:
 
     hb_interval = max(5, int(cfg.heartbeat_seconds))
     pull_interval = max(1, int(cfg.pull_interval_seconds))
+    # When cable is healthy, pull less often (safety net only).
+    pull_interval_when_cabled = max(pull_interval * 6, 30)
     last_hb = 0.0
+    last_pull = 0.0
+    last_cable_try = 0.0
+    last_cable_hb = 0.0
     backoff = 1.0
     max_backoff = 60.0
-    # Sticky: after 404, still retry periodically but don't thrash.
     pull_disabled_until = 0.0
+    cable_retry_after = 0.0
 
-    while running["go"]:
-        now = time.monotonic()
-        cycle_start = now
-        creds = auth.load_credentials(cfg.credentials_path)
+    try:
+        while running["go"]:
+            now = time.monotonic()
+            cycle_start = now
+            creds = auth.load_credentials(cfg.credentials_path)
+            sess = cable_session_holder["s"]
 
-        # Heartbeat on its interval (also when unpaired — writes unpaired status).
-        do_hb = (now - last_hb) >= hb_interval or last_hb == 0.0
-        st: statusio.AgentStatus | None = None
-        if do_hb:
-            st = run_once(cfg, client)
-            last_hb = time.monotonic()
-            if st.cloud == "online":
-                backoff = 1.0
-            elif st.pairing == "paired" and st.cloud == "offline":
-                backoff = min(max_backoff, max(backoff, 1.0) * 2)
-        else:
-            st = statusio.read_status(cfg.status_path)
+            if revoke_flag.is_set():
+                revoke_flag.clear()
+                if sess:
+                    sess.stop()
+                    cable_session_holder["s"] = None
+                if creds:
+                    _handle_unauthorized(cfg, creds)
+                creds = None
+                sess = None
 
-        # Job pull when enabled, paired, and not in backoff from unavailable API.
-        if (
-            cfg.pull_jobs_enabled
-            and creds
-            and (st is None or st.pairing == "paired")
-            and time.monotonic() >= pull_disabled_until
-        ):
-            result = pull_and_process(cfg, client, creds.device_token)
-            if result == "unauthorized":
-                _handle_unauthorized(cfg, creds)
-            elif result == "unavailable":
-                # Back off pulls (404/503) without stopping heartbeats.
-                pull_disabled_until = time.monotonic() + min(60.0, max(15.0, backoff * 5))
-            elif result == "error":
-                pull_disabled_until = time.monotonic() + min(30.0, backoff)
+            # Drain push job queue on the main thread (lp must not run on WS thread).
+            while True:
+                try:
+                    payload = push_jobs.get_nowait()
+                except queue.Empty:
+                    break
+                if creds:
+                    process_job_payload(
+                        payload,
+                        cfg,
+                        client,
+                        creds.device_token,
+                        cable_session=sess,
+                        store=store,
+                    )
 
-        # Sleep: when pulling, wake on pull_interval; else heartbeat interval.
-        if cfg.pull_jobs_enabled and creds and (
-            st is None or st.pairing == "paired"
-        ):
-            sleep_for = float(pull_interval)
-        elif st and st.pairing == "unpaired":
-            sleep_for = min(10.0, float(hb_interval))
-        elif st and st.pairing == "revoked":
-            sleep_for = min(30.0, float(hb_interval))
-        elif st and st.cloud == "offline":
-            sleep_for = min(max_backoff, max(float(hb_interval), backoff))
-        else:
-            sleep_for = float(hb_interval)
+            # Maintain cable when paired
+            if creds and cfg.cable_enabled and cable.websocket_available():
+                need = (
+                    sess is None
+                    or not sess.connected
+                    or (not sess.subscribed and now >= cable_retry_after)
+                )
+                if need and now >= last_cable_try + 2.0:
+                    last_cable_try = now
+                    sess = ensure_cable(creds)
+                    if sess and not sess.subscribed:
+                        if not sess.wait_subscribed(timeout=8.0):
+                            log.warning("cable subscribe timeout — will retry")
+                            sess.stop()
+                            cable_session_holder["s"] = None
+                            sess = None
+                            cable_retry_after = now + min(60.0, backoff * 3)
+                            backoff = min(max_backoff, backoff * 2)
+                        else:
+                            backoff = 1.0
+                    elif sess is None:
+                        cable_retry_after = now + min(60.0, backoff * 3)
+                        backoff = min(max_backoff, backoff * 2)
+            else:
+                if sess:
+                    sess.stop()
+                    cable_session_holder["s"] = None
+                    sess = None
 
-        # Don't sleep past next heartbeat if pull interval is long.
-        if last_hb > 0:
-            until_hb = hb_interval - (time.monotonic() - last_hb)
-            if until_hb > 0:
-                sleep_for = min(sleep_for, until_hb)
+            # Heartbeat: prefer channel when subscribed; always keep REST for LCD/status.
+            do_hb = (now - last_hb) >= hb_interval or last_hb == 0.0
+            st: statusio.AgentStatus | None = None
+            if do_hb:
+                if sess and sess.subscribed and creds:
+                    # Channel heartbeat flushes pending jobs server-side.
+                    try:
+                        inv = printers.inventory_payload()
+                    except Exception:
+                        inv = None
+                    sess.perform(
+                        "heartbeat",
+                        agent_version=AGENT_VERSION,
+                        hostname=sysinfo.hostname(),
+                        printers=inv,
+                    )
+                    last_cable_hb = time.monotonic()
+                    # Still REST-heartbeat for status.json / whoami refresh.
+                st = run_once(cfg, client)
+                last_hb = time.monotonic()
+                if st.cloud == "online":
+                    backoff = 1.0
+                elif st.pairing == "paired" and st.cloud == "offline":
+                    backoff = min(max_backoff, max(backoff, 1.0) * 2)
+            else:
+                st = statusio.read_status(cfg.status_path)
+                # Mid-interval cable heartbeat if subscribed (keeps node online + flush)
+                if (
+                    sess
+                    and sess.subscribed
+                    and creds
+                    and (now - last_cable_hb) >= hb_interval
+                ):
+                    try:
+                        inv = printers.inventory_payload()
+                    except Exception:
+                        inv = None
+                    sess.perform(
+                        "heartbeat",
+                        agent_version=AGENT_VERSION,
+                        hostname=sysinfo.hostname(),
+                        printers=inv,
+                    )
+                    last_cable_hb = time.monotonic()
 
-        elapsed = time.monotonic() - cycle_start
-        time.sleep(max(0.0, sleep_for - elapsed))
+            # REST pull safety net
+            pull_every = (
+                pull_interval_when_cabled
+                if (sess and sess.subscribed)
+                else pull_interval
+            )
+            if (
+                cfg.pull_jobs_enabled
+                and creds
+                and (st is None or st.pairing == "paired")
+                and time.monotonic() >= pull_disabled_until
+                and (time.monotonic() - last_pull) >= pull_every
+            ):
+                result = pull_and_process(
+                    cfg,
+                    client,
+                    creds.device_token,
+                    store=store,
+                    cable_session=sess,
+                )
+                last_pull = time.monotonic()
+                if result == "unauthorized":
+                    _handle_unauthorized(cfg, creds)
+                    if sess:
+                        sess.stop()
+                        cable_session_holder["s"] = None
+                elif result == "unavailable":
+                    pull_disabled_until = time.monotonic() + min(
+                        60.0, max(15.0, backoff * 5)
+                    )
+                elif result == "error":
+                    pull_disabled_until = time.monotonic() + min(30.0, backoff)
+
+            # Sleep
+            if push_jobs.qsize() > 0:
+                sleep_for = 0.05
+            elif cfg.pull_jobs_enabled and creds and (
+                st is None or st.pairing == "paired"
+            ):
+                sleep_for = min(float(pull_interval), 1.0 if (sess and sess.subscribed) else float(pull_interval))
+            elif st and st.pairing == "unpaired":
+                sleep_for = min(10.0, float(hb_interval))
+            elif st and st.pairing == "revoked":
+                sleep_for = min(30.0, float(hb_interval))
+            elif st and st.cloud == "offline":
+                sleep_for = min(max_backoff, max(float(hb_interval), backoff))
+            else:
+                sleep_for = float(hb_interval)
+
+            if last_hb > 0:
+                until_hb = hb_interval - (time.monotonic() - last_hb)
+                if until_hb > 0:
+                    sleep_for = min(sleep_for, until_hb)
+
+            elapsed = time.monotonic() - cycle_start
+            time.sleep(max(0.0, sleep_for - elapsed))
+    finally:
+        sess = cable_session_holder["s"]
+        if sess:
+            sess.stop()
 
 
 def main() -> None:

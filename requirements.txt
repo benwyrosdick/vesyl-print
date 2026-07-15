@@ -1,0 +1,3 @@
+# Optional but required for Phase D ActionCable push (PrintNodeChannel).
+# Pull-path jobs work without it. Debian: apt install python3-websocket
+websocket-client>=1.6.0

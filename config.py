@@ -80,6 +80,8 @@ class Config:
     pull_interval_seconds: int = 5
     # Phase C: poll GET /print/v1/jobs/pending (disable if server lacks PR4).
     pull_jobs_enabled: bool = True
+    # Phase D: ActionCable PrintNodeChannel push (pull remains safety net).
+    cable_enabled: bool = True
     config_dir: Path = field(default_factory=resolve_config_dir)
     state_dir: Path = field(default_factory=resolve_state_dir)
 
@@ -129,6 +131,8 @@ def _apply_file(data: dict[str, Any], cfg: Config) -> None:
         cfg.pull_interval_seconds = int(data["pull_interval_seconds"])
     if "pull_jobs_enabled" in data:
         cfg.pull_jobs_enabled = bool(data["pull_jobs_enabled"])
+    if "cable_enabled" in data:
+        cfg.cable_enabled = bool(data["cable_enabled"])
 
 
 def load_config(
@@ -177,6 +181,7 @@ def write_default_config(path: Path | None = None) -> Path:
         "heartbeat_seconds": cfg.heartbeat_seconds,
         "pull_interval_seconds": cfg.pull_interval_seconds,
         "pull_jobs_enabled": True,
+        "cable_enabled": True,
     }
     out.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
     return out

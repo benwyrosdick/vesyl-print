@@ -10,8 +10,11 @@ Raspberry Pi **print node** for VESYL: LCD status display, CUPS printer discover
 | **Agent** (`agent.py` / `vesyl-print-agent.service`) | Heartbeats + `whoami`; writes status for the LCD |
 | **CLI** (`vesyl-print`) | `claim`, `enroll`, `status`, `unpair` |
 
-**Local print (Phase B)** + **cloud job pull (Phase C)** are implemented.
-Set `pull_jobs_enabled: true` (default) to poll `GET /print/v1/jobs/pending`.
+**Local print (Phase B)** + **cloud job pull (Phase C)** + **ActionCable push (Phase D)** are implemented.
+
+- Pull: `pull_jobs_enabled` (default `true`) — always-on safety net  
+- Push: `cable_enabled` (default `true`) — `PrintNodeChannel` on `/print/cable`  
+- Push requires `websocket-client` (`python3-websocket` or `pip install -r requirements.txt`)
 
 ## Hardware
 
@@ -38,25 +41,37 @@ This installs dependencies, display overlay, config dirs, CLI, and both systemd 
   "cable_url": "wss://wms.api.staging.vesyl.com/print/cable",
   "heartbeat_seconds": 30,
   "pull_interval_seconds": 5,
-  "pull_jobs_enabled": true
+  "pull_jobs_enabled": true,
+  "cable_enabled": true
 }
 ```
 
 | Key | Meaning |
 |-----|---------|
-| `heartbeat_seconds` | `POST /print/v1/heartbeat` interval |
-| `pull_interval_seconds` | How often to poll `GET /print/v1/jobs/pending` |
-| `pull_jobs_enabled` | When `true`, pull + ack + state after durable queue write |
+| `heartbeat_seconds` | REST + cable heartbeat interval |
+| `pull_interval_seconds` | REST pull when cable is down (slower when cable is up) |
+| `pull_jobs_enabled` | REST pull safety net |
+| `cable_enabled` | ActionCable push via `cable_url` |
+| `cable_url` | e.g. `wss://wms-api.vesyl.dev/print/cable` |
 
-Job pull flow (at-least-once):
+### Job delivery
 
-1. `GET /print/v1/jobs/pending` → job payloads  
+**Push (preferred when cable subscribed):**
+
+1. `POST /print/v1/ws_ticket` → connect `cable_url?token=…`  
+2. Subscribe `PrintNodeChannel`  
+3. On `{type: print_job, job: {…}}` → same durable pipeline  
+4. Prefer channel `ack_job` / `job_state`; fall back to REST  
+
+**Pull (safety net):**
+
+1. `GET /print/v1/jobs/pending`  
 2. Write `queue/<id>.json` (fsync)  
-3. `POST /print/v1/jobs/:id/ack`  
-4. Fetch/decode content → `lp`  
-5. `POST /print/v1/jobs/:id/state` with `done` or `error`  
+3. `POST …/ack` (or cable `ack_job`)  
+4. content → `lp`  
+5. `POST …/state` `done`|`error`  
 
-404/503 on pending backs off pulls without stopping heartbeats.
+Also handles cable `{type: revoke}` (re-pair) and `{type: job_canceled}`.
 
 | Topology | `api_base_url` |
 |----------|----------------|
@@ -186,17 +201,18 @@ Unit tests mock HTTP; no network or real tokens required.
 config.py      # paths, api_base_url, env
 auth.py        # credentials 0600
 cloud.py       # claim / enroll / whoami / heartbeat / ws_ticket
-agent.py       # heartbeat loop + queue drain
+agent.py       # heartbeat + pull + cable session
+cable.py       # ActionCable PrintNodeChannel client
 jobs.py        # durable queue + print pipeline
 statusio.py    # status.json for LCD
 cli.py         # vesyl-print entry
 main.py        # LCD
 printers.py    # CUPS discovery + inventory_payload()
+requirements.txt  # websocket-client for cable
 ```
 
 ## Non-goals (this phase)
 
-- ActionCable push (Phase D — keep pull as safety net)
 - ZPL/EPL raw thermal (`raw_*` content types rejected for now)
 - GPIO claim keypad
 - Label generation on the Pi

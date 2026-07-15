@@ -1,0 +1,15 @@
+{
+  "identifier": "{\"channel\":\"PrintNodeChannel\"}",
+  "message": {
+    "type": "print_job",
+    "job": {
+      "id": "job-uuid-1",
+      "printer_id": "printer-1",
+      "cups_name": "Label_1",
+      "content_type": "pdf_uri",
+      "content": "https://cdn.example.com/a.pdf",
+      "title": "Ship label",
+      "options": { "copies": 1 }
+    }
+  }
+}

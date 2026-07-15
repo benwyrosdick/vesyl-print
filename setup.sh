@@ -40,9 +40,17 @@ echo "==> Repo:        $REPO_DIR"
 echo "==> Run as user: $RUN_USER"
 
 # --- 1. dependencies -------------------------------------------------------
-echo "==> Installing dependencies (python3, Pillow, numpy, fonts, CUPS)..."
+echo "==> Installing dependencies (python3, Pillow, numpy, fonts, CUPS, websocket)..."
 apt-get update || echo "   (apt-get update failed — continuing with cached lists)"
-apt-get install -y python3 python3-pil python3-numpy fonts-dejavu-core cups
+apt-get install -y python3 python3-pil python3-numpy fonts-dejavu-core cups \
+    python3-websocket || true
+# Fallback if distro package missing — ActionCable push needs websocket-client.
+if ! python3 -c "import websocket" 2>/dev/null; then
+    echo "==> Installing websocket-client via pip"
+    pip3 install --break-system-packages websocket-client || \
+        pip3 install websocket-client || \
+        echo "   WARNING: websocket-client install failed — cable push disabled (pull still works)"
+fi
 
 # The service user must be in 'video' to write /dev/fb1, and 'lpadmin' to
 # discover and add network printers to CUPS without sudo.
@@ -117,7 +125,8 @@ if [[ ! -f /etc/vesyl-print/config.json ]]; then
   "cable_url": "wss://wms.api.staging.vesyl.com/print/cable",
   "heartbeat_seconds": 30,
   "pull_interval_seconds": 5,
-  "pull_jobs_enabled": true
+  "pull_jobs_enabled": true,
+  "cable_enabled": true
 }
 CFG
     chown "$RUN_USER:$RUN_GROUP" /etc/vesyl-print/config.json

@@ -1,0 +1,6 @@
+{
+  "identifier": "{\"channel\":\"PrintNodeChannel\"}",
+  "message": {
+    "type": "revoke"
+  }
+}
