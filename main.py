@@ -131,25 +131,25 @@ class InfoScreen:
         st: statusio.AgentStatus | None,
         cloud: str,
     ) -> Image.Image:
-        # Printer list sits above the status line; body rows share the rest.
+        # Printer list sits above the status line (right side).
         printer_line_h = 18
         n_printers = len(self.printer_names)
         list_bottom = self.h - 48
-        if n_printers:
-            list_top = list_bottom - (n_printers - 1) * printer_line_h
-            footer_top = list_top - 8
-        else:
-            footer_top = self.h - 52
 
         org = (st.organization_name if st else None) or "—"
         wh = (st.warehouse_name if st else None) or "—"
 
-        row_span = max(footer_top - body_top, 1)
-        step = row_span / 4
-        self._row(d, "ORGANIZATION", org, y=round(body_top))
-        self._row(d, "WAREHOUSE", wh, y=round(body_top + step))
-        self._row(d, "IP ADDRESS", sysinfo.primary_ip(), y=round(body_top + 2 * step))
-        self._row(d, "CPU TEMP", sysinfo.cpu_temp_c(), y=round(body_top + 3 * step))
+        # Fixed pitch so each label/value block has air above the next label
+        # (even spacing used to squeeze rows when printers ate the footer).
+        row_pitch = 56
+        rows = [
+            ("ORGANIZATION", org),
+            ("WAREHOUSE", wh),
+            ("IP ADDRESS", sysinfo.primary_ip()),
+            ("CPU TEMP", sysinfo.cpu_temp_c()),
+        ]
+        for i, (label, value) in enumerate(rows):
+            self._row(d, label, value, y=body_top + i * row_pitch)
 
         max_name_w = self.w - 120
         for i, raw in enumerate(self.printer_names):
@@ -255,7 +255,7 @@ class InfoScreen:
 
     def _row(self, d, label, value, y):
         d.text((16, y), label, font=self.f_label, fill=MUTED)
-        d.text((16, y + 22), value, font=self.f_value, fill=FG)
+        d.text((16, y + 24), value, font=self.f_value, fill=FG)
 
 
 def open_framebuffer(device: str, wait: float = 0.0) -> Framebuffer:
