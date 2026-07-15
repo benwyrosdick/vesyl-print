@@ -1,4 +1,4 @@
-"""vesyl-print CLI: claim, enroll, status, unpair, agent."""
+"""vesyl-print CLI: claim, enroll, status, unpair, agent, print-test."""
 
 from __future__ import annotations
 
@@ -6,9 +6,12 @@ import argparse
 import json
 import logging
 import sys
+from pathlib import Path
 
 import agent as agent_mod
 import auth
+import jobs
+import printers
 import statusio
 import sysinfo
 from cloud import CloudClient, CloudError
@@ -204,10 +207,55 @@ def cmd_agent(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_print_test(args: argparse.Namespace) -> int:
+    """Submit a local file through the durable job pipeline (no cloud)."""
+    cfg = load_config()
+    cfg.ensure_dirs()
+
+    path = Path(args.file).expanduser()
+    if not path.is_file():
+        _die(f"file not found: {path}")
+
+    queue = args.queue
+    if not queue:
+        # Prefer first configured CUPS network queue name (not display name).
+        nets = printers.configured_network_queues()
+        if not nets:
+            _die("no CUPS network printers; pass --queue <cups_name>")
+        queue = nets[0][0]
+        print(f"Using CUPS queue: {queue}")
+
+    try:
+        job = jobs.job_from_local_file(
+            path,
+            queue,
+            title=args.title,
+            copies=args.copies,
+        )
+    except jobs.JobError as e:
+        _die(e.message)
+
+    store = jobs.store_from_config(cfg)
+    print(f"job_id:     {job.id}")
+    print(f"file:       {path}")
+    print(f"cups_name:  {queue}")
+    print(f"queue_dir:  {store.queue_dir}")
+
+    try:
+        state = jobs.receive_job(job, store)
+    except jobs.JobError as e:
+        _die(f"print failed: {e.message} ({e.code})")
+
+    print(f"result:     {state}")
+    if store.is_processed(job.id):
+        print(f"processed:  {store.processed_path(job.id)}")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="vesyl-print",
-        description="VESYL print node — claim, enroll, status, agent",
+        description="VESYL print node — claim, enroll, status, agent, print-test",
     )
     p.add_argument(
         "--version",
@@ -240,6 +288,30 @@ def build_parser() -> argparse.ArgumentParser:
     a = sub.add_parser("agent", help="Run the cloud agent (heartbeat loop)")
     a.add_argument("-v", "--verbose", action="store_true")
     a.set_defaults(func=cmd_agent)
+
+    pt = sub.add_parser(
+        "print-test",
+        help="Print a local file via durable queue + CUPS (no cloud)",
+    )
+    pt.add_argument(
+        "--file",
+        "-f",
+        required=True,
+        help="Path to PDF/PNG/JPEG (or any file CUPS accepts)",
+    )
+    pt.add_argument(
+        "--queue",
+        "-q",
+        help="CUPS queue name (default: first network printer)",
+    )
+    pt.add_argument("--title", help="Job title for lp -t")
+    pt.add_argument(
+        "--copies",
+        type=int,
+        default=1,
+        help="Number of copies (default 1)",
+    )
+    pt.set_defaults(func=cmd_print_test)
 
     return p
 

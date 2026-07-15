@@ -8,6 +8,7 @@ import time
 from datetime import datetime, timezone
 
 import auth
+import jobs
 import printers
 import statusio
 import sysinfo
@@ -138,6 +139,18 @@ def run_once(cfg: Config, client: CloudClient | None = None) -> statusio.AgentSt
         return st
 
 
+def drain_local_queue(cfg: Config) -> None:
+    """Crash recovery: finish any jobs left in queue/*.json."""
+    store = jobs.store_from_config(cfg)
+    pending = store.list_queued_ids()
+    if not pending:
+        return
+    log.info("draining %d queued job(s)", len(pending))
+    results = jobs.drain_queue(store)
+    for job_id, result in results:
+        log.info("drain %s → %s", job_id, result)
+
+
 def run_agent(cfg: Config | None = None) -> None:
     """Long-running heartbeat loop with reconnect backoff."""
     cfg = cfg or load_config()
@@ -149,10 +162,17 @@ def run_agent(cfg: Config | None = None) -> None:
     signal.signal(signal.SIGTERM, lambda *_: running.update(go=False))
 
     log.info(
-        "agent starting api_base_url=%s heartbeat=%ss",
+        "agent starting api_base_url=%s heartbeat=%ss pull_jobs=%s",
         cfg.api_base_url,
         cfg.heartbeat_seconds,
+        cfg.pull_jobs_enabled,
     )
+
+    # Phase B: recover durable jobs before heartbeats. Cloud pull is Phase C.
+    try:
+        drain_local_queue(cfg)
+    except Exception:
+        log.exception("queue drain failed")
 
     backoff = 1.0
     max_backoff = 60.0

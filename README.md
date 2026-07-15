@@ -10,7 +10,8 @@ Raspberry Pi **print node** for VESYL: LCD status display, CUPS printer discover
 | **Agent** (`agent.py` / `vesyl-print-agent.service`) | Heartbeats + `whoami`; writes status for the LCD |
 | **CLI** (`vesyl-print`) | `claim`, `enroll`, `status`, `unpair` |
 
-Job pull/print is prepared for later; `pull_jobs_enabled` stays `false` until wms-api job APIs ship.
+**Local print (Phase B)** is implemented: durable queue, PDF/PNG/JPEG via CUPS, startup drain.
+Cloud **job pull** stays off (`pull_jobs_enabled: false`) until wms-api PR4.
 
 ## Hardware
 
@@ -110,6 +111,30 @@ vesyl-print enroll <TOKEN> [--name NAME]
 vesyl-print status [--check]
 vesyl-print unpair
 vesyl-print agent          # same as agent.py service
+vesyl-print print-test --file ./label.pdf --queue Brother_HL-L3280CDW_series
+```
+
+### Local print test (no cloud)
+
+```bash
+# uses first CUPS network queue if --queue omitted
+vesyl-print print-test --file /home/vesyl/vesyl-print/base.jpg
+vesyl-print print-test -f label.pdf -q My_CUPS_Queue --copies 1
+```
+
+Jobs go through the durable pipeline:
+
+1. Write `queue/<job_id>.json` (fsync)
+2. Materialize content → `lp -d <cups_name>`
+3. Marker `processed/<job_id>`, delete queue file
+
+On agent start, any leftover `queue/*.json` is drained (crash recovery).
+
+Paths (on a provisioned Pi):
+
+```
+/var/lib/vesyl-print/queue/
+/var/lib/vesyl-print/processed/
 ```
 
 ## Services
@@ -145,7 +170,8 @@ Unit tests mock HTTP; no network or real tokens required.
 config.py      # paths, api_base_url, env
 auth.py        # credentials 0600
 cloud.py       # claim / enroll / whoami / heartbeat / ws_ticket
-agent.py       # heartbeat loop
+agent.py       # heartbeat loop + queue drain
+jobs.py        # durable queue + print pipeline
 statusio.py    # status.json for LCD
 cli.py         # vesyl-print entry
 main.py        # LCD
@@ -154,7 +180,8 @@ printers.py    # CUPS discovery + inventory_payload()
 
 ## Non-goals (this phase)
 
-- Job pull/print (enable later with `pull_jobs_enabled`)
-- ActionCable push
+- Cloud job pull / ack / state REST (Phase C — `pull_jobs_enabled`)
+- ActionCable push (Phase D)
+- ZPL/EPL raw thermal (`raw_*` content types rejected for now)
 - GPIO claim keypad
 - Label generation on the Pi

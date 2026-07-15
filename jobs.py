@@ -1,0 +1,502 @@
+"""Local print jobs: durable queue, content fetch, CUPS submit.
+
+Ordering (at-least-once, crash-safe):
+
+1. If processed/<job_id> exists → already done (idempotent), skip print
+2. If no queue file → write + fsync full job JSON to queue/<job_id>.json
+3. Only then call ack callback (when cloud supports it)
+4. Materialize content → lp -d <cups_name>
+5. Report done / error via state callback
+6. On success: write processed/<job_id>, delete queue file
+
+On agent start: drain_queue() recovers queue/*.json left from crashes.
+
+raw_* content types are rejected until a thermal/raw spike is documented.
+"""
+
+from __future__ import annotations
+
+import base64
+import json
+import logging
+import os
+import subprocess
+import tempfile
+import urllib.error
+import urllib.request
+import uuid
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Callable, Protocol
+
+log = logging.getLogger("vesyl-print.jobs")
+
+# content_type → file suffix for temp materialization
+_SUFFIX = {
+    "pdf_uri": ".pdf",
+    "pdf_base64": ".pdf",
+    "png_uri": ".png",
+    "png_base64": ".png",
+    "jpeg_uri": ".jpg",
+    "jpeg_base64": ".jpg",
+    "jpg_uri": ".jpg",
+    "jpg_base64": ".jpg",
+    "local_path": None,  # use source path as-is
+}
+
+_SUPPORTED = set(_SUFFIX) | {"local_path"}
+_RAW_TYPES = {"raw_uri", "raw_base64"}
+
+
+class JobError(Exception):
+    """Print / queue failure with a short machine-friendly code."""
+
+    def __init__(self, message: str, *, code: str = "job_error"):
+        super().__init__(message)
+        self.message = message
+        self.code = code
+
+
+@dataclass
+class PrintJob:
+    id: str
+    cups_name: str
+    content_type: str
+    content: str
+    title: str | None = None
+    printer_id: str | None = None
+    options: dict[str, Any] = field(default_factory=dict)
+    raw: dict[str, Any] = field(default_factory=dict)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> PrintJob:
+        job_id = data.get("id") or data.get("job_id")
+        if not job_id:
+            raise JobError("job missing id", code="invalid_job")
+        cups = data.get("cups_name") or data.get("cups_queue")
+        if not cups:
+            raise JobError("job missing cups_name", code="invalid_job")
+        ctype = data.get("content_type") or data.get("type")
+        if not ctype:
+            raise JobError("job missing content_type", code="invalid_job")
+        content = data.get("content")
+        if content is None or content == "":
+            raise JobError("job missing content", code="invalid_job")
+        opts = data.get("options") if isinstance(data.get("options"), dict) else {}
+        return cls(
+            id=str(job_id),
+            cups_name=str(cups),
+            content_type=str(ctype).lower(),
+            content=str(content),
+            title=(str(data["title"]) if data.get("title") else None),
+            printer_id=(str(data["printer_id"]) if data.get("printer_id") else None),
+            options=dict(opts),
+            raw=dict(data),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize for durable queue (prefer original payload if present)."""
+        if self.raw:
+            out = dict(self.raw)
+            out.setdefault("id", self.id)
+            out.setdefault("cups_name", self.cups_name)
+            out.setdefault("content_type", self.content_type)
+            out.setdefault("content", self.content)
+            return out
+        return {
+            "id": self.id,
+            "cups_name": self.cups_name,
+            "content_type": self.content_type,
+            "content": self.content,
+            "title": self.title,
+            "printer_id": self.printer_id,
+            "options": self.options,
+        }
+
+
+# Optional cloud hooks (Phase C). Defaults are no-ops so Phase B is local-only.
+AckFn = Callable[[PrintJob], None]
+StateFn = Callable[[PrintJob, str, str | None], None]
+
+
+def _noop_ack(_job: PrintJob) -> None:
+    return None
+
+
+def _noop_state(_job: PrintJob, _state: str, _detail: str | None = None) -> None:
+    return None
+
+
+class LpRunner(Protocol):
+    def __call__(
+        self,
+        cups_name: str,
+        path: Path,
+        *,
+        title: str | None,
+        copies: int,
+    ) -> None: ...
+
+
+def default_lp(
+    cups_name: str,
+    path: Path,
+    *,
+    title: str | None = None,
+    copies: int = 1,
+) -> None:
+    """Submit a file to CUPS via `lp`. Raises JobError on failure."""
+    cmd = ["lp", "-d", cups_name]
+    if copies and copies > 1:
+        cmd.extend(["-n", str(copies)])
+    if title:
+        cmd.extend(["-t", title])
+    cmd.append(str(path))
+    try:
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=60
+        )
+    except (OSError, subprocess.SubprocessError) as e:
+        raise JobError(f"lp failed: {e}", code="lp_error") from e
+    if result.returncode != 0:
+        err = (result.stderr or result.stdout or "lp failed").strip()
+        raise JobError(err, code="lp_error")
+
+
+@dataclass
+class JobStore:
+    """Durable queue + processed markers under state_dir."""
+
+    queue_dir: Path
+    processed_dir: Path
+
+    def ensure(self) -> None:
+        self.queue_dir.mkdir(parents=True, exist_ok=True)
+        self.processed_dir.mkdir(parents=True, exist_ok=True)
+
+    def queue_path(self, job_id: str) -> Path:
+        return self.queue_dir / f"{job_id}.json"
+
+    def processed_path(self, job_id: str) -> Path:
+        return self.processed_dir / job_id
+
+    def is_processed(self, job_id: str) -> bool:
+        return self.processed_path(job_id).is_file()
+
+    def has_queue_file(self, job_id: str) -> bool:
+        return self.queue_path(job_id).is_file()
+
+    def write_queue(self, job: PrintJob) -> Path:
+        """Write job JSON with fsync. Idempotent if file already exists."""
+        self.ensure()
+        path = self.queue_path(job.id)
+        if path.is_file():
+            return path
+        raw = json.dumps(job.to_dict(), indent=2) + "\n"
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(raw)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, path)
+            # fsync directory for durability on crash
+            try:
+                dir_fd = os.open(str(self.queue_dir), os.O_RDONLY)
+                try:
+                    os.fsync(dir_fd)
+                finally:
+                    os.close(dir_fd)
+            except OSError:
+                pass
+        except Exception:
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise
+        return path
+
+    def mark_processed(self, job_id: str) -> None:
+        self.ensure()
+        path = self.processed_path(job_id)
+        path.write_text(_utc_marker(), encoding="utf-8")
+        try:
+            os.chmod(path, 0o644)
+        except OSError:
+            pass
+
+    def delete_queue(self, job_id: str) -> None:
+        try:
+            self.queue_path(job_id).unlink(missing_ok=True)
+        except OSError:
+            pass
+
+    def load_queued(self, job_id: str) -> PrintJob:
+        path = self.queue_path(job_id)
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as e:
+            raise JobError(f"corrupt queue file {path}: {e}", code="corrupt_queue") from e
+        if not isinstance(data, dict):
+            raise JobError(f"corrupt queue file {path}", code="corrupt_queue")
+        return PrintJob.from_dict(data)
+
+    def list_queued_ids(self) -> list[str]:
+        self.ensure()
+        ids: list[str] = []
+        for p in sorted(self.queue_dir.glob("*.json")):
+            if p.name.endswith(".tmp"):
+                continue
+            ids.append(p.stem)
+        return ids
+
+
+def _utc_marker() -> str:
+    from datetime import datetime, timezone
+
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat() + "\n"
+
+
+def materialize_content(
+    job: PrintJob,
+    *,
+    work_dir: Path | None = None,
+    fetch_url: Callable[[str], bytes] | None = None,
+) -> tuple[Path, bool]:
+    """Return (path, is_temp). Caller must delete temp files when is_temp.
+
+    Supports pdf/png/jpeg uri|base64 and local_path. raw_* raises JobError.
+    """
+    ctype = job.content_type
+    if ctype in _RAW_TYPES:
+        raise JobError(
+            f"content_type {ctype} not supported (raw/thermal spike required)",
+            code="unsupported_content",
+        )
+    if ctype not in _SUPPORTED:
+        raise JobError(f"unsupported content_type: {ctype}", code="unsupported_content")
+
+    if ctype == "local_path":
+        path = Path(job.content).expanduser()
+        if not path.is_file():
+            raise JobError(f"local file not found: {path}", code="content_missing")
+        return path, False
+
+    if work_dir is None:
+        work_dir = Path(tempfile.mkdtemp(prefix="vesyl-print-"))
+    else:
+        work_dir.mkdir(parents=True, exist_ok=True)
+
+    suffix = _SUFFIX.get(ctype) or ".bin"
+    out = work_dir / f"{job.id}{suffix}"
+
+    if ctype.endswith("_base64"):
+        try:
+            # tolerate data-url prefix
+            payload = job.content
+            if "," in payload and payload.strip().lower().startswith("data:"):
+                payload = payload.split(",", 1)[1]
+            data = base64.b64decode(payload, validate=False)
+        except (ValueError, TypeError) as e:
+            raise JobError(f"invalid base64 content: {e}", code="content_bad") from e
+        if not data:
+            raise JobError("empty base64 content", code="content_bad")
+        out.write_bytes(data)
+        return out, True
+
+    # *_uri
+    fetcher = fetch_url or _http_get
+    try:
+        data = fetcher(job.content)
+    except Exception as e:
+        raise JobError(f"fetch failed: {e}", code="content_fetch") from e
+    if not data:
+        raise JobError("empty content from uri", code="content_bad")
+    out.write_bytes(data)
+    return out, True
+
+
+def _http_get(url: str, timeout: float = 60.0) -> bytes:
+    req = urllib.request.Request(
+        url, headers={"User-Agent": "vesyl-print-agent", "Accept": "*/*"}
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return resp.read()
+    except urllib.error.HTTPError as e:
+        body = e.read()[:200] if e.fp else b""
+        raise JobError(
+            f"HTTP {e.code} fetching content", code="content_fetch"
+        ) from e
+    except urllib.error.URLError as e:
+        raise JobError(f"network error fetching content: {e.reason}", code="content_fetch") from e
+
+
+def process_job(
+    job: PrintJob,
+    store: JobStore,
+    *,
+    lp: LpRunner = default_lp,
+    ack: AckFn = _noop_ack,
+    report_state: StateFn = _noop_state,
+    fetch_url: Callable[[str], bytes] | None = None,
+    work_dir: Path | None = None,
+) -> str:
+    """Run the full durable pipeline for one job.
+
+    Returns terminal state: "done" or raises JobError after reporting error.
+    """
+    store.ensure()
+    job_id = job.id
+
+    # 1. Already finished — idempotent success (drop any leftover queue file)
+    if store.is_processed(job_id):
+        log.info("job %s already processed — skip", job_id)
+        store.delete_queue(job_id)
+        try:
+            report_state(job, "done", "already_processed")
+        except Exception:
+            log.debug("report_state failed", exc_info=True)
+        return "done"
+
+    # 2. Durable receive before any ack / print
+    store.write_queue(job)
+
+    # 3. Ack only after disk durability
+    try:
+        ack(job)
+    except Exception as e:
+        # Ack failure is non-fatal for local print; cloud can redeliver.
+        log.warning("ack failed for job %s: %s", job_id, e)
+
+    # 4–5. Materialize + print
+    path: Path | None = None
+    is_temp = False
+    try:
+        report_state(job, "printing", None)
+    except Exception:
+        pass
+
+    try:
+        path, is_temp = materialize_content(job, work_dir=work_dir, fetch_url=fetch_url)
+        copies = int(job.options.get("copies") or 1)
+        if copies < 1:
+            copies = 1
+        lp(job.cups_name, path, title=job.title, copies=copies)
+        try:
+            report_state(job, "done", None)
+        except Exception:
+            log.debug("report_state done failed", exc_info=True)
+        # 6. Mark processed then drop queue file
+        store.mark_processed(job_id)
+        store.delete_queue(job_id)
+        log.info("job %s done → %s", job_id, job.cups_name)
+        return "done"
+    except JobError as e:
+        try:
+            report_state(job, "error", e.message)
+        except Exception:
+            pass
+        log.error("job %s error: %s", job_id, e.message)
+        raise
+    except Exception as e:
+        msg = str(e)
+        try:
+            report_state(job, "error", msg)
+        except Exception:
+            pass
+        log.error("job %s error: %s", job_id, msg)
+        raise JobError(msg, code="job_error") from e
+    finally:
+        if is_temp and path is not None:
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            # clean work_dir if we created a single-file temp dir empty enough
+            if work_dir is None and path is not None:
+                parent = path.parent
+                try:
+                    if parent.name.startswith("vesyl-print-"):
+                        parent.rmdir()
+                except OSError:
+                    pass
+
+
+def drain_queue(
+    store: JobStore,
+    *,
+    lp: LpRunner = default_lp,
+    ack: AckFn = _noop_ack,
+    report_state: StateFn = _noop_state,
+    fetch_url: Callable[[str], bytes] | None = None,
+) -> list[tuple[str, str]]:
+    """Process every queue/*.json (crash recovery). Returns [(job_id, result)]."""
+    store.ensure()
+    results: list[tuple[str, str]] = []
+    for job_id in store.list_queued_ids():
+        try:
+            job = store.load_queued(job_id)
+        except JobError as e:
+            log.error("skip corrupt queue %s: %s", job_id, e.message)
+            results.append((job_id, f"error:{e.code}"))
+            continue
+        try:
+            state = process_job(
+                job,
+                store,
+                lp=lp,
+                ack=ack,
+                report_state=report_state,
+                fetch_url=fetch_url,
+            )
+            results.append((job_id, state))
+        except JobError as e:
+            results.append((job_id, f"error:{e.code}"))
+        except Exception as e:
+            results.append((job_id, f"error:{e}"))
+    return results
+
+
+def receive_job(
+    job: PrintJob,
+    store: JobStore,
+    *,
+    lp: LpRunner = default_lp,
+    ack: AckFn = _noop_ack,
+    report_state: StateFn = _noop_state,
+    fetch_url: Callable[[str], bytes] | None = None,
+) -> str:
+    """Entry point for a newly delivered job (pull/push later)."""
+    return process_job(
+        job, store, lp=lp, ack=ack, report_state=report_state, fetch_url=fetch_url
+    )
+
+
+def job_from_local_file(
+    path: Path | str,
+    cups_name: str,
+    *,
+    job_id: str | None = None,
+    title: str | None = None,
+    copies: int = 1,
+) -> PrintJob:
+    """Build a PrintJob that prints an existing file (CLI print-test)."""
+    p = Path(path).expanduser().resolve()
+    if not p.is_file():
+        raise JobError(f"file not found: {p}", code="content_missing")
+    return PrintJob(
+        id=job_id or str(uuid.uuid4()),
+        cups_name=cups_name,
+        content_type="local_path",
+        content=str(p),
+        title=title or f"vesyl-print test {p.name}",
+        options={"copies": copies},
+    )
+
+
+def store_from_config(cfg: Any) -> JobStore:
+    """Build JobStore from a Config-like object with queue_dir/processed_dir."""
+    return JobStore(queue_dir=Path(cfg.queue_dir), processed_dir=Path(cfg.processed_dir))
