@@ -8,8 +8,9 @@
 #   2. enables SPI + the mhs35 display overlay in the boot config,
 #   3. installs the mhs35 device-tree overlay if the OS doesn't have it,
 #   4. creates /etc/vesyl-print + /var/lib/vesyl-print,
-#   5. installs and enables the LCD + cloud agent systemd services,
-#   6. installs the vesyl-print CLI wrapper.
+#   5. installs the OTA apply-update helper + sudoers drop-in,
+#   6. installs and enables the LCD + cloud agent systemd services,
+#   7. installs the vesyl-print CLI wrapper.
 #
 # Usage:  sudo ./setup.sh
 #
@@ -43,7 +44,7 @@ echo "==> Run as user: $RUN_USER"
 echo "==> Installing dependencies (python3, Pillow, numpy, fonts, CUPS, websocket)..."
 apt-get update || echo "   (apt-get update failed — continuing with cached lists)"
 apt-get install -y python3 python3-pil python3-numpy fonts-dejavu-core cups \
-    python3-websocket || true
+    python3-websocket python3-cryptography || true
 # Fallback if distro package missing — ActionCable push needs websocket-client.
 if ! python3 -c "import websocket" 2>/dev/null; then
     echo "==> Installing websocket-client via pip"
@@ -136,6 +137,47 @@ else
     echo "   config.json already present"
 fi
 
+# --- 4b. OTA apply-update helper + sudoers ---------------------------------
+# Agent runs as $RUN_USER; install/restart needs root for /opt symlink flip
+# and systemctl. Scope is exactly this helper path (no shell wildcards).
+APPLY_UPDATE="/usr/local/lib/vesyl-print/apply-update"
+SUDOERS_DROPIN="/etc/sudoers.d/vesyl-print"
+
+echo "==> Installing OTA helper: $APPLY_UPDATE"
+install -d -m 0755 /usr/local/lib/vesyl-print
+if [[ -f "$REPO_DIR/scripts/apply-update" ]]; then
+    install -m 0755 "$REPO_DIR/scripts/apply-update" "$APPLY_UPDATE"
+else
+    echo "   WARNING: $REPO_DIR/scripts/apply-update missing — skip helper" >&2
+fi
+
+if [[ -x "$APPLY_UPDATE" ]]; then
+    echo "==> Installing sudoers drop-in: $SUDOERS_DROPIN"
+    # visudo-safe temp then install 0440
+    tmp_sudoers="$(mktemp)"
+    cat > "$tmp_sudoers" <<SUDO
+# vesyl-print OTA — managed by setup.sh (do not edit by hand)
+# Allows the service user to activate releases and restart units only.
+$RUN_USER ALL=(root) NOPASSWD: $APPLY_UPDATE
+SUDO
+    if visudo -cf "$tmp_sudoers" >/dev/null 2>&1; then
+        install -m 0440 "$tmp_sudoers" "$SUDOERS_DROPIN"
+        echo "   $RUN_USER may run: sudo -n $APPLY_UPDATE …"
+    else
+        echo "   WARNING: sudoers snippet failed visudo -cf — not installed" >&2
+        cat "$tmp_sudoers" >&2
+    fi
+    rm -f "$tmp_sudoers"
+fi
+
+# Optional: public key for manifest signature verify
+if [[ -f "$REPO_DIR/keys/update_public.pem" ]]; then
+    install -d -o "$RUN_USER" -g "$RUN_GROUP" -m 0755 /etc/vesyl-print/keys
+    install -m 0644 -o "$RUN_USER" -g "$RUN_GROUP" \
+        "$REPO_DIR/keys/update_public.pem" /etc/vesyl-print/keys/update_public.pem
+    echo "   installed /etc/vesyl-print/keys/update_public.pem"
+fi
+
 # --- 5. CLI wrapper --------------------------------------------------------
 echo "==> Installing CLI: $CLI_PATH"
 cat > "$CLI_PATH" <<WRAP
@@ -195,6 +237,7 @@ echo
 echo "==> Done."
 echo "   Services enabled: $DISPLAY_SERVICE, $AGENT_SERVICE"
 echo "   CLI: $CLI_PATH"
+echo "   OTA helper: $APPLY_UPDATE (+ $SUDOERS_DROPIN)"
 echo "   Pair with:  vesyl-print claim <CODE>"
 echo "   Status:     vesyl-print status --check"
 if [[ -e /dev/fb1 ]]; then

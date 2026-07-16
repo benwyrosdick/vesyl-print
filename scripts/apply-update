@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+# Root helper for vesyl-print OTA install steps.
+# Install:  sudo install -m 0755 scripts/apply-update /usr/local/lib/vesyl-print/apply-update
+# Sudoers:  vesyl ALL=(root) NOPASSWD: /usr/local/lib/vesyl-print/apply-update
+#
+# Usage:
+#   apply-update activate <release_dir> <current_symlink>
+#   apply-update restart
+#   apply-update rollback <install_root> <version>
+set -euo pipefail
+
+if [[ $EUID -ne 0 ]]; then
+  echo "apply-update must run as root" >&2
+  exit 1
+fi
+
+cmd="${1:-}"
+shift || true
+
+case "$cmd" in
+  activate)
+    release_dir="${1:?release_dir}"
+    current_link="${2:?current_symlink}"
+    [[ -d "$release_dir" ]] || { echo "missing release_dir: $release_dir" >&2; exit 1; }
+    parent="$(dirname "$current_link")"
+    mkdir -p "$parent"
+    rel="$(realpath --relative-to="$parent" "$release_dir" 2>/dev/null || echo "$release_dir")"
+    tmp="${current_link}.new"
+    rm -f "$tmp"
+    ln -s "$rel" "$tmp"
+    mv -Tf "$tmp" "$current_link"
+    echo "activated $release_dir -> $current_link"
+    ;;
+  restart)
+    systemctl restart vesyl-print-agent.service || true
+    systemctl restart printserve-display.service || true
+    echo "restarted services"
+    ;;
+  rollback)
+    install_root="${1:?install_root}"
+    version="${2:?version}"
+    release_dir="${install_root}/releases/${version}"
+    current_link="${install_root}/current"
+    exec "$0" activate "$release_dir" "$current_link"
+    ;;
+  *)
+    echo "Usage: $0 activate|restart|rollback …" >&2
+    exit 2
+    ;;
+esac

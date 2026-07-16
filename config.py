@@ -9,14 +9,28 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-AGENT_VERSION = "0.3.0"
+def _read_version_file() -> str:
+    try:
+        p = Path(__file__).resolve().parent / "VERSION"
+        if p.is_file():
+            v = p.read_text(encoding="utf-8").strip()
+            if v:
+                return v
+    except OSError:
+        pass
+    return "0.3.0"
+
+
+AGENT_VERSION = _read_version_file()
 
 # Preferred for Pis: direct API host (paths are /print/v1/...).
 DEFAULT_API_BASE_URL = "https://wms.api.staging.vesyl.com"
+DEFAULT_RELEASES_BASE_URL = "https://releases.vesyl.com/print"
 
 ENV_API_URL = "VESYL_PRINT_API_URL"
 ENV_CONFIG_DIR = "VESYL_PRINT_CONFIG_DIR"
 ENV_STATE_DIR = "VESYL_PRINT_STATE_DIR"
+ENV_INSTALL_ROOT = "VESYL_PRINT_INSTALL_ROOT"
 
 
 def default_platform() -> str:
@@ -82,11 +96,18 @@ class Config:
     pull_jobs_enabled: bool = True
     # Phase D: ActionCable PrintNodeChannel push (pull remains safety net).
     cable_enabled: bool = True
+    # OTA (app): cloud sets desired_agent_version on heartbeat response.
+    auto_update_enabled: bool = True
+    update_channel: str = "stable"
+    releases_base_url: str = DEFAULT_RELEASES_BASE_URL
+    update_require_signature: bool = True
+    update_public_key_path: str = ""  # empty → keys/update_public.pem
     config_dir: Path = field(default_factory=resolve_config_dir)
     state_dir: Path = field(default_factory=resolve_state_dir)
 
     def __post_init__(self) -> None:
         self.api_base_url = str(self.api_base_url).rstrip("/")
+        self.releases_base_url = str(self.releases_base_url).rstrip("/")
         self.config_dir = Path(self.config_dir)
         self.state_dir = Path(self.state_dir)
         if not self.cable_url:
@@ -103,6 +124,10 @@ class Config:
     @property
     def status_path(self) -> Path:
         return self.state_dir / "status.json"
+
+    @property
+    def update_status_path(self) -> Path:
+        return self.state_dir / "update_status.json"
 
     @property
     def queue_dir(self) -> Path:
@@ -133,6 +158,16 @@ def _apply_file(data: dict[str, Any], cfg: Config) -> None:
         cfg.pull_jobs_enabled = bool(data["pull_jobs_enabled"])
     if "cable_enabled" in data:
         cfg.cable_enabled = bool(data["cable_enabled"])
+    if "auto_update_enabled" in data:
+        cfg.auto_update_enabled = bool(data["auto_update_enabled"])
+    if ch := data.get("update_channel"):
+        cfg.update_channel = str(ch)
+    if rb := data.get("releases_base_url"):
+        cfg.releases_base_url = str(rb).rstrip("/")
+    if "update_require_signature" in data:
+        cfg.update_require_signature = bool(data["update_require_signature"])
+    if kp := data.get("update_public_key_path"):
+        cfg.update_public_key_path = str(kp)
 
 
 def load_config(
@@ -182,6 +217,9 @@ def write_default_config(path: Path | None = None) -> Path:
         "pull_interval_seconds": cfg.pull_interval_seconds,
         "pull_jobs_enabled": True,
         "cable_enabled": True,
+        "auto_update_enabled": True,
+        "update_channel": "stable",
+        "releases_base_url": DEFAULT_RELEASES_BASE_URL,
     }
     out.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
     return out

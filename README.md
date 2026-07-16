@@ -178,6 +178,67 @@ journalctl -u vesyl-print-agent -f
 
 Agent logs never include `device_token`.
 
+## OTA updates (app)
+
+Appliances update over **outbound HTTPS only** — no `git pull` on customer devices.
+
+### How it works
+
+1. CI publishes a signed release tarball + `*.manifest.json` to `releases_base_url`.
+2. Agent heartbeats report `agent_version` (+ optional `update` status).
+3. Heartbeat **response** may include (plan A):
+
+```json
+{
+  "ok": true,
+  "desired_agent_version": "0.4.0",
+  "update_channel": "stable",
+  "update_url": "https://releases.vesyl.com/print/vesyl-print-0.4.0.manifest.json"
+}
+```
+
+4. Agent downloads the artifact, verifies **SHA-256 + Ed25519** signature, unpacks to a new slot under `/opt/vesyl-print/releases/<ver>/`, flips `current`, restarts services.
+
+### CLI
+
+```bash
+vesyl-print version
+vesyl-print update check
+vesyl-print update apply --manifest-url https://…/vesyl-print-0.4.0.manifest.json
+vesyl-print update apply --file ./release.tar.gz --manifest ./release.manifest.json
+vesyl-print update rollback [--version 0.3.0] --restart
+```
+
+### Config (`/etc/vesyl-print/config.json`)
+
+```json
+{
+  "auto_update_enabled": true,
+  "update_channel": "stable",
+  "releases_base_url": "https://releases.vesyl.com/print",
+  "update_require_signature": true,
+  "update_public_key_path": "/etc/vesyl-print/keys/update_public.pem"
+}
+```
+
+Install layout: `/opt/vesyl-print/current` → `releases/<version>` (lab: `$state_dir/app`).  
+Credentials and `/var/lib/vesyl-print` are never part of the tarball.
+
+`setup.sh` installs:
+
+- `/usr/local/lib/vesyl-print/apply-update` (root helper)
+- `/etc/sudoers.d/vesyl-print` — service user may run **only** that helper with `NOPASSWD`
+- optional `/etc/vesyl-print/keys/update_public.pem` if present in the repo
+
+See `keys/README.md` for signing. Requires `python3-cryptography` for signature verify.
+
+### Customer firewall
+
+```text
+HTTPS out → wms.api.* / wms-api.* (API + pairing)
+HTTPS out → releases.vesyl.com (or your artifact host)
+```
+
 ## Stream the LCD (demo)
 
 The **display service** streams the live UI as MJPEG on port **8765** (same

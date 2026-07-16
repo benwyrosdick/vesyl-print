@@ -17,8 +17,9 @@ import printers
 import statusio
 import sysinfo
 from cloud import CloudClient, CloudError
-from config import AGENT_VERSION, Config, load_config
+from config import AGENT_VERSION, Config, default_platform, load_config
 from jobs import JobError, JobStore, PrintJob
+import update as update_mod
 
 log = logging.getLogger("vesyl-print.agent")
 
@@ -125,12 +126,19 @@ def run_once(cfg: Config, client: CloudClient | None = None) -> statusio.AgentSt
     except Exception:
         log.debug("printer inventory unavailable", exc_info=True)
 
+    update_status = update_mod.read_update_status(cfg.update_status_path)
+    update_payload = None
+    if update_status:
+        update_payload = update_status.to_dict()
+
     try:
         hb = client.heartbeat(
             creds.device_token,
             agent_version=AGENT_VERSION,
             hostname=sysinfo.hostname(),
             printers=printers_payload,
+            platform=default_platform(),
+            update=update_payload,
         )
         last_hb = hb.get("last_seen_at") or _utc_now_iso()
         st = _status_from_creds(
@@ -140,6 +148,19 @@ def run_once(cfg: Config, client: CloudClient | None = None) -> statusio.AgentSt
             last_heartbeat_at=str(last_hb),
         )
         statusio.write_status(cfg.status_path, st)
+
+        # OTA plan A: desired version + optional update_url on heartbeat response.
+        try:
+            ust = update_mod.maybe_update_from_heartbeat(
+                hb,
+                cfg=cfg,
+                status=update_status,
+                auto_apply=bool(getattr(cfg, "auto_update_enabled", True)),
+            )
+            update_mod.write_update_status(cfg.update_status_path, ust)
+        except Exception:
+            log.exception("update check failed")
+
         return st
     except CloudError as e:
         if e.unauthorized:

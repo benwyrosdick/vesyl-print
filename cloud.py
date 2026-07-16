@@ -175,7 +175,15 @@ class CloudClient:
         agent_version: str | None = None,
         hostname: str | None = None,
         printers: list[Any] | None = None,
+        platform: str | None = None,
+        update: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        """POST /print/v1/heartbeat.
+
+        Response may include OTA control fields (plan A)::
+
+            desired_agent_version, update_channel, update_url
+        """
         body: dict[str, Any] = {}
         if agent_version is not None:
             body["agent_version"] = agent_version
@@ -183,6 +191,10 @@ class CloudClient:
             body["hostname"] = hostname
         if printers is not None:
             body["printers"] = printers
+        if platform is not None:
+            body["platform"] = platform
+        if update is not None:
+            body["update"] = update
         return self._request(
             "POST", "print/v1/heartbeat", body=body or {}, token=device_token
         )
