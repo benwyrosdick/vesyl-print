@@ -1,13 +1,14 @@
-"""Local print jobs: durable queue, content fetch, CUPS submit.
+"""Local print jobs: durable queue, content fetch, CUPS submit + completion.
 
 Ordering (at-least-once, crash-safe):
 
-1. If processed/<job_id> exists → already done (idempotent), skip print
+1. If processed/<job_id> exists → already finished (idempotent), skip print
 2. If no queue file → write + fsync full job JSON to queue/<job_id>.json
 3. Only then call ack callback (when cloud supports it)
 4. Materialize content → lp -d <cups_name>
-5. Report done / error via state callback
-6. On success: write processed/<job_id>, delete queue file
+5. Report **delivered** when lp accepts the job
+6. Poll CUPS when possible → report **printed** or **error**
+7. On success path: write processed/<job_id>, delete queue file
 
 On agent start: drain_queue() recovers queue/*.json left from crashes.
 
@@ -20,8 +21,10 @@ import base64
 import json
 import logging
 import os
+import re
 import subprocess
 import tempfile
+import time
 import urllib.error
 import urllib.request
 import uuid
@@ -140,7 +143,12 @@ class LpRunner(Protocol):
         *,
         title: str | None,
         copies: int,
-    ) -> None: ...
+    ) -> str | None: ...
+
+
+_LP_REQUEST_RE = re.compile(
+    r"request id is\s+(\S+)", re.IGNORECASE
+)
 
 
 def default_lp(
@@ -149,8 +157,12 @@ def default_lp(
     *,
     title: str | None = None,
     copies: int = 1,
-) -> None:
-    """Submit a file to CUPS via `lp`. Raises JobError on failure."""
+) -> str | None:
+    """Submit a file to CUPS via `lp`.
+
+    Returns the CUPS request id (e.g. ``Zebra_1-42``) when parseable, else None.
+    Raises JobError on submission failure.
+    """
     cmd = ["lp", "-d", cups_name]
     if copies and copies > 1:
         cmd.extend(["-n", str(copies)])
@@ -166,6 +178,70 @@ def default_lp(
     if result.returncode != 0:
         err = (result.stderr or result.stdout or "lp failed").strip()
         raise JobError(err, code="lp_error")
+    text = f"{result.stdout or ''}\n{result.stderr or ''}"
+    m = _LP_REQUEST_RE.search(text)
+    return m.group(1).rstrip("()") if m else None
+
+
+def wait_cups_job(
+    request_id: str,
+    *,
+    timeout_s: float = 180.0,
+    poll_s: float = 1.0,
+) -> str:
+    """Poll CUPS until the job leaves the active queue.
+
+    Returns:
+      ``printed`` — job no longer in not-completed and not listed as canceled/aborted
+      ``error`` — CUPS reports canceled/aborted/held permanently (best-effort)
+      ``unknown`` — timeout or no tracking available (caller leaves status as delivered)
+    """
+    if not request_id:
+        return "unknown"
+
+    deadline = time.monotonic() + max(5.0, timeout_s)
+    # Job id for lpstat filters is often "Printer-N" or "Printer-N.1"
+    job_key = request_id.split()[0]
+
+    while time.monotonic() < deadline:
+        try:
+            active = subprocess.run(
+                ["lpstat", "-W", "not-completed"],
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+        except (OSError, subprocess.SubprocessError) as e:
+            log.debug("lpstat not-completed failed: %s", e)
+            return "unknown"
+
+        active_out = (active.stdout or "") + (active.stderr or "")
+        if job_key not in active_out:
+            # Not in active queue — check completed for abort markers if possible
+            try:
+                done = subprocess.run(
+                    ["lpstat", "-W", "completed", "-l"],
+                    capture_output=True,
+                    text=True,
+                    timeout=15,
+                )
+                done_out = (done.stdout or "") + (done.stderr or "")
+            except (OSError, subprocess.SubprocessError):
+                done_out = ""
+
+            # Find a block mentioning the job and look for failure keywords
+            if job_key in done_out:
+                # crude: if aborted/canceled near the job id, treat as error
+                idx = done_out.find(job_key)
+                snippet = done_out[idx : idx + 400].lower()
+                if any(k in snippet for k in ("canceled", "cancelled", "aborted", "stopped")):
+                    return "error"
+            return "printed"
+
+        time.sleep(max(0.25, poll_s))
+
+    log.warning("CUPS job %s still active after %.0fs — leaving delivered", job_key, timeout_s)
+    return "unknown"
 
 
 @dataclass
@@ -381,7 +457,8 @@ def process_job(
 ) -> str:
     """Run the full durable pipeline for one job.
 
-    Returns terminal state: "done" or raises JobError after reporting error.
+    Returns final local result: ``printed``, ``delivered`` (no CUPS tracking),
+    or raises JobError after reporting error.
     """
     store.ensure()
     job_id = job.id
@@ -391,10 +468,10 @@ def process_job(
         log.info("job %s already processed — skip", job_id)
         store.delete_queue(job_id)
         try:
-            report_state(job, "done", "already_processed")
+            report_state(job, "printed", "already_processed")
         except Exception:
             log.debug("report_state failed", exc_info=True)
-        return "done"
+        return "printed"
 
     # 2. Durable receive before any ack / print
     store.write_queue(job)
@@ -406,7 +483,7 @@ def process_job(
         # Ack failure is non-fatal for local print; cloud can redeliver.
         log.warning("ack failed for job %s: %s", job_id, e)
 
-    # 4–5. Materialize + print
+    # 4–6. Materialize + submit + optional CUPS completion wait
     path: Path | None = None
     is_temp = False
     try:
@@ -419,16 +496,39 @@ def process_job(
         copies = int(job.options.get("copies") or 1)
         if copies < 1:
             copies = 1
-        lp(job.cups_name, path, title=job.title, copies=copies)
+        cups_id = lp(job.cups_name, path, title=job.title, copies=copies)
+        cups_job = cups_id if isinstance(cups_id, str) and cups_id.strip() else None
         try:
-            report_state(job, "done", None)
+            report_state(job, "delivered", cups_job)
         except Exception:
-            log.debug("report_state done failed", exc_info=True)
-        # 6. Mark processed then drop queue file
+            log.debug("report_state delivered failed", exc_info=True)
+
+        final = "delivered"
+        if cups_job:
+            outcome = wait_cups_job(cups_job)
+            if outcome == "printed":
+                try:
+                    report_state(job, "printed", cups_id)
+                except Exception:
+                    log.debug("report_state printed failed", exc_info=True)
+                final = "printed"
+            elif outcome == "error":
+                raise JobError(
+                    f"CUPS job {cups_id} failed", code="cups_job_failed"
+                )
+            else:
+                log.info(
+                    "job %s CUPS tracking unavailable for %s — left delivered",
+                    job_id,
+                    cups_id,
+                )
+        else:
+            log.info("job %s no CUPS request id — left delivered", job_id)
+
         store.mark_processed(job_id)
         store.delete_queue(job_id)
-        log.info("job %s done → %s", job_id, job.cups_name)
-        return "done"
+        log.info("job %s %s → %s", job_id, final, job.cups_name)
+        return final
     except JobError as e:
         try:
             report_state(job, "error", e.message)

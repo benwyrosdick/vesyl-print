@@ -38,7 +38,7 @@ PENDING_JOB = {
     "title": "Ship label",
     "source": "packing",
     "options": {"copies": 1},
-    "state": "sent",
+    "status": "sent",
     "expires_at": "2026-07-15T20:00:00Z",
 }
 
@@ -106,17 +106,17 @@ class TestCloudJobsAPI(unittest.TestCase):
 
         with mock.patch("urllib.request.urlopen", side_effect=fake_urlopen):
             client.ack_job("tok", "job-uuid-1")
-            client.report_job_state("tok", "job-uuid-1", "done")
-            client.report_job_state(
+            client.report_job_status("tok", "job-uuid-1", "delivered")
+            client.report_job_status(
                 "tok", "job-uuid-1", "error", message="lp failed"
             )
 
         self.assertEqual(len(seen), 3)
         self.assertIn("/print/v1/jobs/job-uuid-1/ack", seen[0][1])
         self.assertEqual(seen[0][0], "POST")
-        self.assertIn("/print/v1/jobs/job-uuid-1/state", seen[1][1])
+        self.assertIn("/print/v1/jobs/job-uuid-1/status", seen[1][1])
         state_body = json.loads(seen[2][2].decode())
-        self.assertEqual(state_body["state"], "error")
+        self.assertEqual(state_body["status"], "error")
         self.assertEqual(state_body["message"], "lp failed")
 
 
@@ -145,7 +145,7 @@ class TestPullAndProcess(unittest.TestCase):
             client = mock.Mock()
             client.pending_jobs.return_value = [dict(PENDING_JOB)]
 
-            with mock.patch("jobs.receive_job", return_value="done") as recv:
+            with mock.patch("jobs.receive_job", return_value="delivered") as recv:
                 result = agent_mod.pull_and_process(
                     cfg, client, "device-token", store=store
                 )
@@ -158,7 +158,7 @@ class TestPullAndProcess(unittest.TestCase):
             client.pending_jobs.assert_called_once_with("device-token")
 
     def test_pull_ordering_with_injected_lp(self):
-        """Full order: pending → write queue → ack → lp → state done."""
+        """Full order: pending → write queue → ack → printing → lp → delivered."""
         with tempfile.TemporaryDirectory() as td:
             cfg = self._cfg(td)
             store = jobs.store_from_config(cfg)
@@ -171,15 +171,16 @@ class TestPullAndProcess(unittest.TestCase):
                 events.append("ack")
                 return {"ok": True}
 
-            def report_job_state(token, job_id, state, message=None):
-                events.append(f"state:{state}")
+            def report_job_status(token, job_id, status, message=None):
+                events.append(f"status:{status}")
                 return {"ok": True}
 
             client.ack_job.side_effect = ack_job
-            client.report_job_state.side_effect = report_job_state
+            client.report_job_status.side_effect = report_job_status
 
             def lp(cups, path, *, title=None, copies=1):
                 events.append("lp")
+                return None  # no CUPS job id → leave as delivered
 
             # Drive through receive_job with hooks from cloud_job_hooks
             payloads = client.pending_jobs("tok")
@@ -187,13 +188,13 @@ class TestPullAndProcess(unittest.TestCase):
             ack, report_state = agent_mod.cloud_job_hooks(client, "tok")
             jobs.receive_job(job, store, lp=lp, ack=ack, report_state=report_state)
 
-            self.assertEqual(events, ["ack", "lp", "state:done"])
+            self.assertEqual(
+                events, ["ack", "status:printing", "lp", "status:delivered"]
+            )
             self.assertTrue(store.is_processed(job.id))
             self.assertFalse(store.has_queue_file(job.id))
-            # "printing" must not be sent to cloud
-            client.report_job_state.assert_called_once()
-            args = client.report_job_state.call_args
-            self.assertEqual(args[0][2], "done")
+            statuses = [c[0][2] for c in client.report_job_status.call_args_list]
+            self.assertEqual(statuses, ["printing", "delivered"])
 
     def test_pull_404_returns_unavailable(self):
         with tempfile.TemporaryDirectory() as td:
@@ -215,7 +216,7 @@ class TestPullAndProcess(unittest.TestCase):
             result = agent_mod.pull_and_process(cfg, client, "tok")
             self.assertEqual(result, "unauthorized")
 
-    def test_already_processed_reports_done_without_reprint(self):
+    def test_already_processed_reports_printed_without_reprint(self):
         with tempfile.TemporaryDirectory() as td:
             cfg = self._cfg(td)
             store = jobs.store_from_config(cfg)
@@ -229,14 +230,14 @@ class TestPullAndProcess(unittest.TestCase):
             jobs.receive_job(job, store, lp=lp, ack=ack, report_state=report_state)
             lp.assert_not_called()
             client.ack_job.assert_not_called()
-            client.report_job_state.assert_called_once()
+            client.report_job_status.assert_called_once()
             self.assertEqual(
-                client.report_job_state.call_args[0][2], "done"
+                client.report_job_status.call_args[0][2], "printed"
             )
 
 
 class TestCloudHooks(unittest.TestCase):
-    def test_hooks_skip_printing_state(self):
+    def test_hooks_report_printing_and_error(self):
         client = mock.Mock()
         ack, report_state = agent_mod.cloud_job_hooks(client, "tok")
         job = PrintJob(
@@ -246,9 +247,12 @@ class TestCloudHooks(unittest.TestCase):
             content="AA==",
         )
         report_state(job, "printing", None)
-        client.report_job_state.assert_not_called()
+        client.report_job_status.assert_called_once_with(
+            "tok", "j1", "printing", message=None
+        )
+        client.report_job_status.reset_mock()
         report_state(job, "error", "boom")
-        client.report_job_state.assert_called_once_with(
+        client.report_job_status.assert_called_once_with(
             "tok", "j1", "error", message="boom"
         )
 

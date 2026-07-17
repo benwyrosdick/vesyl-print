@@ -67,23 +67,23 @@ def cloud_job_hooks(
     *,
     cable_session: cable.PrintCableSession | None = None,
 ) -> tuple[Callable[[PrintJob], None], Callable[[PrintJob, str, str | None], None]]:
-    """Build ack / state callbacks — prefer ActionCable when subscribed, else REST."""
+    """Build ack / status callbacks — prefer ActionCable when subscribed, else REST."""
 
     def ack(job: PrintJob) -> None:
         if cable_session and cable_session.perform("ack_job", job_id=job.id):
             return
         client.ack_job(device_token, job.id)
 
-    def report_state(job: PrintJob, state: str, detail: str | None = None) -> None:
-        # Server accepts only done|error from agents (not "printing").
-        if state not in ("done", "error"):
+    def report_state(job: PrintJob, status: str, detail: str | None = None) -> None:
+        # printing | delivered (lp handoff) | printed (CUPS complete) | error
+        if status not in ("printing", "delivered", "printed", "error"):
             return
         if cable_session and cable_session.perform(
-            "job_state", job_id=job.id, state=state, message=detail
+            "job_status", job_id=job.id, status=status, message=detail
         ):
             return
-        client.report_job_state(
-            device_token, job.id, state, message=detail
+        client.report_job_status(
+            device_token, job.id, status, message=detail
         )
 
     return ack, report_state

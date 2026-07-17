@@ -143,7 +143,7 @@ class ActionCableClient:
         return self._subscribed.wait(timeout=timeout)
 
     def perform(self, action: str, **data: Any) -> None:
-        """Invoke a channel action (heartbeat, ack_job, job_state, …)."""
+        """Invoke a channel action (heartbeat, ack_job, job_status, …)."""
         payload = {"action": action, **{k: v for k, v in data.items() if v is not None}}
         frame = {
             "command": "message",

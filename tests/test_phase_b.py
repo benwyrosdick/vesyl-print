@@ -63,7 +63,7 @@ class TestDurableQueueOrdering(unittest.TestCase):
                 events.append(f"state:{st}")
 
             result = process_job(job, store, lp=lp, ack=ack, report_state=state)
-            self.assertEqual(result, "done")
+            self.assertIn(result, ("delivered", "printed"))
             self.assertEqual(events[0], "ack")
             self.assertIn("lp", events)
             self.assertTrue(store.is_processed(job.id))
@@ -79,7 +79,7 @@ class TestDurableQueueOrdering(unittest.TestCase):
             lp = mock.Mock()
             ack = mock.Mock()
             result = process_job(job, store, lp=lp, ack=ack)
-            self.assertEqual(result, "done")
+            self.assertIn(result, ("delivered", "printed"))
             lp.assert_not_called()
             ack.assert_not_called()
 
@@ -124,7 +124,7 @@ class TestDrain(unittest.TestCase):
 
             results = drain_queue(store, lp=lp)
             self.assertEqual(len(results), 2)
-            self.assertTrue(all(r[1] == "done" for r in results))
+            self.assertTrue(all(r[1] in ("delivered", "printed") for r in results))
             self.assertEqual(len(printed), 2)
             self.assertEqual(store.list_queued_ids(), [])
             self.assertTrue(store.is_processed("q1"))
@@ -138,7 +138,7 @@ class TestDrain(unittest.TestCase):
             store.mark_processed(job.id)
             lp = mock.Mock()
             results = drain_queue(store, lp=lp)
-            self.assertEqual(results, [("done-already", "done")])
+            self.assertEqual(results, [("done-already", "printed")])
             lp.assert_not_called()
             self.assertFalse(store.has_queue_file(job.id))
 

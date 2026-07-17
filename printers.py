@@ -218,7 +218,7 @@ def ensure_printer() -> str | None:
 
 
 def inventory_payload() -> list[dict[str, str]]:
-    """CUPS network printer inventory for heartbeat (server may ignore for now)."""
+    """CUPS network printer inventory for heartbeat / report_printers."""
     items: list[dict[str, str]] = []
     for queue, uri in configured_network_queues():
         items.append(
@@ -226,6 +226,8 @@ def inventory_payload() -> list[dict[str, str]]:
                 "cups_name": queue,
                 "uri": uri,
                 "display_name": _display_name(queue),
+                # Matches print_printers.status on the server.
+                "status": "unknown",
             }
         )
     return items

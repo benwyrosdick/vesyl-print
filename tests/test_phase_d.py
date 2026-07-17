@@ -171,13 +171,13 @@ class TestAgentCableHooks(unittest.TestCase):
             content="AA==",
         )
         ack(job)
-        report(job, "done", None)
+        report(job, "delivered", None)
         sess.perform.assert_any_call("ack_job", job_id="j1")
         sess.perform.assert_any_call(
-            "job_state", job_id="j1", state="done", message=None
+            "job_status", job_id="j1", status="delivered", message=None
         )
         client.ack_job.assert_not_called()
-        client.report_job_state.assert_not_called()
+        client.report_job_status.assert_not_called()
 
     def test_hooks_fallback_rest(self):
         client = mock.Mock()
@@ -195,7 +195,7 @@ class TestAgentCableHooks(unittest.TestCase):
         ack(job)
         report(job, "error", "nope")
         client.ack_job.assert_called_once_with("tok", "j1")
-        client.report_job_state.assert_called_once_with(
+        client.report_job_status.assert_called_once_with(
             "tok", "j1", "error", message="nope"
         )
 

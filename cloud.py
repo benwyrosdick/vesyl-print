@@ -226,17 +226,17 @@ class CloudClient:
         path = f"print/v1/jobs/{quote(str(job_id), safe='')}/ack"
         return self._request("POST", path, body={}, token=device_token)
 
-    def report_job_state(
+    def report_job_status(
         self,
         device_token: str,
         job_id: str,
-        state: str,
+        status: str,
         *,
         message: str | None = None,
     ) -> dict[str, Any]:
-        """POST /print/v1/jobs/:id/state — agent may only send done|error."""
-        path = f"print/v1/jobs/{quote(str(job_id), safe='')}/state"
-        body: dict[str, Any] = {"state": state}
+        """POST /print/v1/jobs/:id/status — printing|delivered|printed|error."""
+        path = f"print/v1/jobs/{quote(str(job_id), safe='')}/status"
+        body: dict[str, Any] = {"status": status}
         if message is not None:
             body["message"] = message
         return self._request("POST", path, body=body, token=device_token)
