@@ -302,7 +302,7 @@ Options on `main.py` / the unit’s `ExecStart`:
 ```bash
 python3 main.py                  # stream on (default)
 python3 main.py --no-stream      # LCD only
-python3 main.py --stream-port 8765 --stream-scale 2 --stream-fps 2
+python3 main.py --stream-port 8765 --stream-scale 1 --stream-fps 2
 ```
 
 Standalone (polls `/dev/fb1` without embedding in the display loop):

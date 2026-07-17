@@ -418,7 +418,7 @@ def main() -> None:
         "--stream-scale",
         type=float,
         default=DEFAULT_SCALE,
-        help="upscale for viewing (default 2)",
+        help="upscale for viewing (default 1)",
     )
     ap.add_argument(
         "--stream-quality",

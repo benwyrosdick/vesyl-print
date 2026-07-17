@@ -8,7 +8,7 @@ Used two ways:
 
 2. **Standalone** (optional) — poll ``/dev/fb1`` without the display loop:
 
-       python3 stream_lcd.py --port 8765 --fps 2 --scale 2
+       python3 stream_lcd.py --port 8765 --fps 2 --scale 1
 
 Needs group ``video`` for ``/dev/fb1``. Binds 0.0.0.0 by default (trusted LAN only).
 """
@@ -35,7 +35,7 @@ log = logging.getLogger("vesyl-print.stream")
 BOUNDARY = b"frame"
 DEFAULT_PORT = 8765
 DEFAULT_FPS = 2.0
-DEFAULT_SCALE = 2.0
+DEFAULT_SCALE = 1.0
 DEFAULT_QUALITY = 80
 
 HTML_PAGE = """\
