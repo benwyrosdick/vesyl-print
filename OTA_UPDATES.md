@@ -163,29 +163,33 @@ heartbeat and from the CLI.
 2. Response may include desired_agent_version (+ update_channel, update_url)
 3. If desired empty or == current → idle
 4. If auto_update_enabled false → record target only, do not install
-5. Resolve manifest URL:
+5. If jobs in flight (durable queue or buffered ActionCable jobs) →
+     defer install (stay idle, keep target); retry next heartbeat
+6. Resolve manifest URL:
      - heartbeat.update_url if set
      - else {releases_base_url}/vesyl-print-{desired}.manifest.json
-6. Fetch manifest → verify Ed25519 (if require_signature)
-7. Download tarball → verify SHA-256
-8. Extract to releases/<version>/ (path-escape rejected)
-9. Write VERSION file; ensure agent.py or main.py present
-10. Activate:
+7. Fetch manifest → verify Ed25519 (if require_signature)
+8. Download tarball → verify SHA-256
+   (while status is downloading|installing|pending_health: **pause**
+    REST job pull and ActionCable print_job processing)
+9. Extract to releases/<version>/ (path-escape rejected)
+10. Write VERSION file; ensure agent.py or main.py present
+11. Activate:
       - preferred: sudo -n apply-update activate <release> <current>
       - else: atomic symlink flip as the service user (lab install root)
-11. Persist `update_status.json` with `status=pending_health`,
+12. Persist `update_status.json` with `status=pending_health`,
     `previous_version`, and `health_deadline_at` (default 120s)
-12. Restart services (apply-update restart or systemctl)
-13. New agent process runs the **health gate**:
+13. Restart services (apply-update restart or systemctl)
+14. New agent process runs the **health gate**:
       - local: `current` has agent/main + VERSION matches target
       - if paired: `GET /print/v1/whoami` must reach the API (`ok` or
         `unauthorized` both count — proves the new code talks to cloud)
       - if unpaired: local checks only
-14. Health OK → `status=idle` (OTA success)
-15. Health not ready → stay `pending_health` and retry each cycle
-16. Hard local failure **or** deadline exceeded → auto-rollback to
+15. Health OK → `status=idle` (OTA success); job pull/push resume
+16. Health not ready → stay `pending_health` and retry each cycle
+17. Hard local failure **or** deadline exceeded → auto-rollback to
     `previous_version`, restart services, `status=rolled_back`
-17. Pre-activate failure: leave previous `current`; `status=failed`;
+18. Pre-activate failure: leave previous `current`; `status=failed`;
     no half-open symlink
 ```
 
@@ -337,10 +341,10 @@ Release process must bump `VERSION` (and tags) in the same commit as the ship.
   (`Print::UpdateDirective`, `print_nodes.desired_agent_version`, settings `PRINT_DESIRED_AGENT_VERSION`)  
 - [x] Migrate production units to `/opt/vesyl-print/current` (factory `setup.sh`)  
 - [x] Post-update health gate (whoami / local checks; auto-rollback on failure)  
+- [x] Pause job pull during install; avoid updating mid-job  
 
 ### Open (must land for fleet OTA)
 
-- [ ] Pause job pull during install; avoid updating mid-job  
 - [ ] LCD “Updating…” / failed update messaging  
 - [ ] Fleet metrics: version histogram, failure rate  
 - [ ] Optional: mirror GitHub Release assets to `releases.vesyl.com` if customers block github.com  

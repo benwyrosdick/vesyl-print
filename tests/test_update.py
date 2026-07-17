@@ -422,5 +422,59 @@ class TestHealthGate(unittest.TestCase):
         self.assertEqual(st.channel, "stable")
 
 
+class TestJobPauseAndDefer(unittest.TestCase):
+    def test_should_pause_jobs_statuses(self):
+        self.assertFalse(update_mod.should_pause_jobs(None))
+        self.assertFalse(
+            update_mod.should_pause_jobs(
+                update_mod.UpdateStatus(status=update_mod.STATUS_IDLE)
+            )
+        )
+        self.assertFalse(
+            update_mod.should_pause_jobs(
+                update_mod.UpdateStatus(status=update_mod.STATUS_FAILED)
+            )
+        )
+        for s in (
+            update_mod.STATUS_DOWNLOADING,
+            update_mod.STATUS_INSTALLING,
+            update_mod.STATUS_PENDING_HEALTH,
+        ):
+            self.assertTrue(
+                update_mod.should_pause_jobs(update_mod.UpdateStatus(status=s)),
+                msg=s,
+            )
+
+    def test_should_pause_jobs_from_path(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "update_status.json"
+            self.assertFalse(update_mod.should_pause_jobs_from_path(path))
+            st = update_mod.UpdateStatus(
+                status=update_mod.STATUS_INSTALLING,
+                current_version="0.3.0",
+                target_version="0.4.0",
+            )
+            update_mod.write_update_status(path, st)
+            self.assertTrue(update_mod.should_pause_jobs_from_path(path))
+
+    def test_maybe_update_defers_when_jobs_busy(self):
+        cfg = Config(
+            api_base_url="https://example.test",
+            auto_update_enabled=True,
+            releases_base_url="https://releases.example/print",
+        )
+        with mock.patch.object(update_mod, "fetch_manifest") as fetch:
+            out = update_mod.maybe_update_from_heartbeat(
+                {"desired_agent_version": "9.9.9"},
+                cfg=cfg,
+                auto_apply=True,
+                jobs_busy=True,
+            )
+            fetch.assert_not_called()
+        self.assertEqual(out.target_version, "9.9.9")
+        self.assertEqual(out.status, update_mod.STATUS_IDLE)
+        self.assertNotEqual(out.status, update_mod.STATUS_DOWNLOADING)
+
+
 if __name__ == "__main__":
     unittest.main()

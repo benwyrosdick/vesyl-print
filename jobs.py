@@ -257,6 +257,10 @@ class JobStore:
             ids.append(p.stem)
         return ids
 
+    def has_pending_work(self) -> bool:
+        """True if any durable queue file exists (job mid-print or crash recovery)."""
+        return bool(self.list_queued_ids())
+
 
 def _utc_marker() -> str:
     from datetime import datetime, timezone

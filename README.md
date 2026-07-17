@@ -239,9 +239,12 @@ Local build (optional): `UPDATE_PRIVATE_KEY_FILE=… ./scripts/build-release.sh 
 
 4. Agent downloads, verifies **SHA-256 + Ed25519**, installs under `/opt/vesyl-print/releases/<ver>/`, flips `current`.
 5. Status becomes `pending_health` (not success yet); services restart.
+   While `downloading` / `installing` / `pending_health`, **job pull and
+   ActionCable print processing pause**. OTA is deferred if the durable queue
+   (or buffered push jobs) still has work — never flip slots mid-print.
 6. New agent runs the **health gate**: local slot checks + `whoami` when paired.
-   On success → `idle`. On hard failure or deadline (`update_health_gate_seconds`,
-   default 120s) → auto-rollback to the previous slot and restart.
+   On success → `idle` (jobs resume). On hard failure or deadline
+   (`update_health_gate_seconds`, default 120s) → auto-rollback and restart.
 
 ### CLI
 

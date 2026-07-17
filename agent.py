@@ -89,8 +89,17 @@ def cloud_job_hooks(
     return ack, report_state
 
 
-def run_once(cfg: Config, client: CloudClient | None = None) -> statusio.AgentStatus:
-    """Single REST heartbeat cycle. Updates status file for the LCD."""
+def run_once(
+    cfg: Config,
+    client: CloudClient | None = None,
+    *,
+    jobs_busy: bool = False,
+) -> statusio.AgentStatus:
+    """Single REST heartbeat cycle. Updates status file for the LCD.
+
+    ``jobs_busy``: when True, OTA download/install is deferred (queue non-empty
+    or in-flight ActionCable jobs) so we never flip slots mid-print.
+    """
     client = client or CloudClient(cfg.api_base_url)
     creds = auth.load_credentials(cfg.credentials_path)
 
@@ -216,6 +225,7 @@ def run_once(cfg: Config, client: CloudClient | None = None) -> statusio.AgentSt
                 status=update_status,
                 auto_apply=bool(getattr(cfg, "auto_update_enabled", True)),
                 status_path=cfg.update_status_path,
+                jobs_busy=jobs_busy,
             )
             update_mod.write_update_status(cfg.update_status_path, ust)
         except Exception:
@@ -534,28 +544,46 @@ def run_agent(cfg: Config | None = None) -> None:
                 creds = None
                 sess = None
 
+            # Pause pull/push while OTA is downloading, installing, or in health gate.
+            ota_pause_jobs = update_mod.should_pause_jobs_from_path(
+                cfg.update_status_path
+            )
+
             # Drain push job queue on the main thread (lp must not run on WS thread).
-            while True:
-                try:
-                    payload = push_jobs.get_nowait()
-                except queue.Empty:
-                    break
-                if creds:
-                    process_job_payload(
-                        payload,
-                        cfg,
-                        client,
-                        creds.device_token,
-                        cable_session=sess,
-                        store=store,
-                    )
+            # Skip while OTA is active so we never start a print that restart would kill.
+            if not ota_pause_jobs:
+                while True:
+                    try:
+                        payload = push_jobs.get_nowait()
+                    except queue.Empty:
+                        break
+                    if creds:
+                        process_job_payload(
+                            payload,
+                            cfg,
+                            client,
+                            creds.device_token,
+                            cable_session=sess,
+                            store=store,
+                        )
+            elif push_jobs.qsize() > 0:
+                log.debug(
+                    "OTA in progress — holding %d ActionCable job(s)",
+                    push_jobs.qsize(),
+                )
 
             # REST heartbeat first — cable must never block liveness / LCD status.
+            # Defer OTA if durable queue or buffered push jobs still have work.
+            jobs_busy = store.has_pending_work() or push_jobs.qsize() > 0
             do_hb = (now - last_hb) >= hb_interval or last_hb == 0.0
             st: statusio.AgentStatus | None = None
             if do_hb:
-                st = run_once(cfg, client)
+                st = run_once(cfg, client, jobs_busy=jobs_busy)
                 last_hb = time.monotonic()
+                # Re-read after OTA may have entered downloading/installing/pending_health.
+                ota_pause_jobs = update_mod.should_pause_jobs_from_path(
+                    cfg.update_status_path
+                )
                 if st.cloud == "online":
                     backoff = 1.0
                 elif st.pairing == "paired" and st.cloud == "offline":
@@ -601,13 +629,16 @@ def run_agent(cfg: Config | None = None) -> None:
                     cable_session_holder["s"] = None
                     sess = None
 
-            # REST pull safety net
+            # REST pull safety net (paused during OTA install / health gate)
             pull_every = (
                 pull_interval_when_cabled
                 if (sess and sess.subscribed)
                 else pull_interval
             )
-            if (
+            if ota_pause_jobs:
+                if cfg.pull_jobs_enabled and creds:
+                    log.debug("OTA in progress — pausing job pull")
+            elif (
                 cfg.pull_jobs_enabled
                 and creds
                 and (st is None or st.pairing == "paired")

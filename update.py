@@ -74,6 +74,15 @@ STATUS_PENDING_HEALTH = "pending_health"
 STATUS_FAILED = "failed"
 STATUS_ROLLED_BACK = "rolled_back"
 
+# While in these states, do not pull/process new print jobs (OTA in progress).
+_JOB_PAUSE_STATUSES = frozenset(
+    {
+        STATUS_DOWNLOADING,
+        STATUS_INSTALLING,
+        STATUS_PENDING_HEALTH,
+    }
+)
+
 
 @dataclass
 class UpdateStatus:
@@ -254,6 +263,24 @@ def health_gate_seconds(cfg: Any | None = None) -> int:
             except (TypeError, ValueError):
                 pass
     return DEFAULT_HEALTH_GATE_SECONDS
+
+
+def should_pause_jobs(status: UpdateStatus | None) -> bool:
+    """True while OTA is downloading, installing, or waiting on health gate.
+
+    Agent must not REST-pull or process ActionCable print_job deliveries until
+    the gate clears (``idle`` / ``failed`` / ``rolled_back``).
+    """
+    if status is None:
+        return False
+    return status.status in _JOB_PAUSE_STATUSES
+
+
+def should_pause_jobs_from_path(path: Path | None) -> bool:
+    """Read ``update_status.json`` and apply :func:`should_pause_jobs`."""
+    if path is None:
+        return False
+    return should_pause_jobs(read_update_status(Path(path)))
 
 
 # --- crypto ----------------------------------------------------------------
@@ -844,11 +871,16 @@ def maybe_update_from_heartbeat(
     status: UpdateStatus | None = None,
     auto_apply: bool = True,
     status_path: Path | None = None,
+    jobs_busy: bool = False,
 ) -> UpdateStatus:
     """Inspect heartbeat response (plan A) and optionally apply update.
 
     After a successful activate, status becomes ``pending_health`` (not idle).
     The agent must call :func:`process_pending_health` after restart.
+
+    When ``jobs_busy`` is true (durable queue non-empty or in-flight push
+    jobs), download/install is deferred until the next heartbeat so we never
+    flip slots mid-print.
     """
     st = status or UpdateStatus(current_version=package_version())
     st.current_version = package_version()
@@ -880,6 +912,23 @@ def maybe_update_from_heartbeat(
         if st.status not in (STATUS_FAILED, STATUS_ROLLED_BACK, STATUS_PENDING_HEALTH):
             st.status = STATUS_IDLE
         log.info("update available: %s → %s (auto_update disabled)", st.current_version, desired)
+        return st
+
+    # Do not begin download/install while a job is mid-pipeline.
+    if jobs_busy:
+        if st.status not in (
+            STATUS_DOWNLOADING,
+            STATUS_INSTALLING,
+            STATUS_PENDING_HEALTH,
+            STATUS_FAILED,
+            STATUS_ROLLED_BACK,
+        ):
+            st.status = STATUS_IDLE
+        log.info(
+            "update deferred: jobs in flight (%s → %s)",
+            st.current_version,
+            desired,
+        )
         return st
 
     # Build manifest URL
