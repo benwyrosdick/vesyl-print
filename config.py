@@ -24,7 +24,7 @@ def _read_version_file() -> str:
 AGENT_VERSION = _read_version_file()
 
 # Preferred for Pis: direct API host (paths are /print/v1/...).
-DEFAULT_API_BASE_URL = "https://wms.api.staging.vesyl.com"
+DEFAULT_API_BASE_URL = "https://wms-api.vesyl.dev"
 DEFAULT_RELEASES_BASE_URL = "https://releases.vesyl.com/print"
 
 ENV_API_URL = "VESYL_PRINT_API_URL"

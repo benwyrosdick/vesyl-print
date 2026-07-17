@@ -122,8 +122,8 @@ install -d -o "$RUN_USER" -g "$RUN_GROUP" -m 0755 /var/lib/vesyl-print/processed
 if [[ ! -f /etc/vesyl-print/config.json ]]; then
     cat > /etc/vesyl-print/config.json <<'CFG'
 {
-  "api_base_url": "https://wms.api.staging.vesyl.com",
-  "cable_url": "wss://wms.api.staging.vesyl.com/print/cable",
+  "api_base_url": "https://wms-api.vesyl.dev",
+  "cable_url": "wss://wms-api.vesyl.dev/print/cable",
   "heartbeat_seconds": 30,
   "pull_interval_seconds": 5,
   "pull_jobs_enabled": true,

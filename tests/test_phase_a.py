@@ -125,7 +125,7 @@ class TestConfig(unittest.TestCase):
             with mock.patch.dict(
                 os.environ,
                 {
-                    "VESYL_PRINT_API_URL": "https://wms.api.staging.vesyl.com",
+                    "VESYL_PRINT_API_URL": "https://wms-api.vesyl.dev",
                     "VESYL_PRINT_CONFIG_DIR": str(cdir),
                     "VESYL_PRINT_STATE_DIR": str(sdir),
                 },
@@ -133,7 +133,7 @@ class TestConfig(unittest.TestCase):
             ):
                 cfg = load_config()
             self.assertEqual(
-                cfg.api_base_url, "https://wms.api.staging.vesyl.com"
+                cfg.api_base_url, "https://wms-api.vesyl.dev"
             )
             self.assertEqual(cfg.heartbeat_seconds, 15)
             self.assertTrue(cfg.cable_url.startswith("wss://"))

@@ -53,8 +53,8 @@ This installs dependencies, display overlay, config dirs, CLI, and both systemd 
 
 ```json
 {
-  "api_base_url": "https://wms.api.staging.vesyl.com",
-  "cable_url": "wss://wms.api.staging.vesyl.com/print/cable",
+  "api_base_url": "https://wms-api.vesyl.dev",
+  "cable_url": "wss://wms-api.vesyl.dev/print/cable",
   "heartbeat_seconds": 30,
   "pull_interval_seconds": 5,
   "pull_jobs_enabled": true,
@@ -91,7 +91,7 @@ Also handles cable `{type: revoke}` (re-pair) and `{type: job_canceled}`.
 
 | Topology | `api_base_url` |
 |----------|----------------|
-| Direct API (preferred) | `https://wms.api.staging.vesyl.com` or `https://wms.api.vesyl.com` |
+| Direct API (preferred) | `https://wms-api.vesyl.dev` or `https://wms.api.vesyl.com` |
 | Edge + `/api` prefix | `https://wms.staging.vesyl.com/api` |
 
 **Env override:** `VESYL_PRINT_API_URL` → `api_base_url`.
@@ -119,7 +119,7 @@ Never commit credentials or device tokens.
 ```bash
 # optional: point at staging
 sudo edit /etc/vesyl-print/config.json   # set api_base_url
-# or: export VESYL_PRINT_API_URL=https://wms.api.staging.vesyl.com
+# or: export VESYL_PRINT_API_URL=https://wms-api.vesyl.dev
 
 vesyl-print claim AB7K2Q9M
 # optional name:
