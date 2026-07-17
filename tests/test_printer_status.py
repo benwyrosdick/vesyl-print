@@ -151,5 +151,57 @@ class TestWaitCupsJob(unittest.TestCase):
         self.assertEqual(result, "unknown")
 
 
+class TestWaitTickLiveness(unittest.TestCase):
+    """While blocked on CUPS (paper-out), REST heartbeats must keep flowing."""
+
+    def test_rest_heartbeat_even_when_cable_subscribed(self):
+        import agent as agent_mod
+
+        client = mock.Mock()
+        sess = mock.Mock()
+        sess.subscribed = True
+        sess.perform.return_value = True
+
+        tick = agent_mod._inventory_wait_tick(
+            sess,
+            client=client,
+            device_token="tok",
+            heartbeat_seconds=30,
+        )
+        with mock.patch(
+            "agent.printers.inventory_payload",
+            return_value=[{"cups_name": "P1", "state": "stopped"}],
+        ), mock.patch("agent.time.monotonic", return_value=100.0):
+            tick()
+            tick()  # second call within interval — no extra REST
+
+        # REST heartbeat always sent (cloud last_seen), even if cable is up.
+        self.assertEqual(client.heartbeat.call_count, 1)
+        client.heartbeat.assert_called_with(
+            "tok",
+            agent_version=mock.ANY,
+            hostname=mock.ANY,
+            printers=[{"cups_name": "P1", "state": "stopped"}],
+            platform=mock.ANY,
+        )
+        # Cable still gets a refresh too.
+        self.assertTrue(sess.perform.called)
+
+    def test_rest_heartbeat_when_inventory_fails(self):
+        import agent as agent_mod
+
+        client = mock.Mock()
+        tick = agent_mod._inventory_wait_tick(
+            None, client=client, device_token="tok", heartbeat_seconds=30
+        )
+        with mock.patch(
+            "agent.printers.inventory_payload", side_effect=RuntimeError("cups down")
+        ), mock.patch("agent.time.monotonic", return_value=50.0):
+            tick()
+        client.heartbeat.assert_called_once()
+        kwargs = client.heartbeat.call_args.kwargs
+        self.assertIsNone(kwargs.get("printers"))
+
+
 if __name__ == "__main__":
     unittest.main()

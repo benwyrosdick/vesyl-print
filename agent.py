@@ -284,38 +284,63 @@ def _inventory_wait_tick(
     *,
     client: CloudClient | None = None,
     device_token: str | None = None,
+    heartbeat_seconds: int = 30,
 ) -> Callable[[], None]:
-    """Build on_wait_tick that re-reports CUPS status while a job is held.
+    """Build on_wait_tick for long CUPS waits (out of paper, jam, etc.).
 
-    Prefer ActionCable report_printers; fall back to REST heartbeat when the
-    cable is down so admin still sees out-of-paper / jam during long waits.
+    Job processing runs on the agent main thread and blocks the normal loop, so
+    this tick must keep **REST heartbeats** flowing — that is what the web uses
+    for last_seen / offline detection. Previously we only called cable
+    ``report_printers`` when subscribed and skipped REST, which produced multi-
+    minute gaps while waiting on a paper-empty printer.
+
+    Also refreshes printer inventory over cable when available.
     """
-    last = {"t": 0.0}
-    min_interval = 10.0
+    last_rest = {"t": 0.0}
+    last_cable = {"t": 0.0}
+    # Match configured heartbeat (default 30s); never slower than 10s for liveness.
+    rest_interval = max(10.0, float(heartbeat_seconds or 30))
+    cable_interval = min(15.0, rest_interval)
 
     def tick() -> None:
         now = time.monotonic()
-        if now - last["t"] < min_interval:
-            return
-        last["t"] = now
+        inv: list[Any] | None = None
         try:
             inv = printers.inventory_payload()
         except Exception:
             log.debug("wait-tick inventory failed", exc_info=True)
-            return
+            inv = None
+
+        # Optional: keep ActionCable path warm (does not replace REST last_seen).
         if cable_session is not None and cable_session.subscribed:
-            if cable_session.perform("report_printers", printers=inv):
-                return
+            if now - last_cable["t"] >= cable_interval:
+                last_cable["t"] = now
+                try:
+                    if inv is not None:
+                        cable_session.perform("report_printers", printers=inv)
+                    cable_session.perform(
+                        "heartbeat",
+                        agent_version=AGENT_VERSION,
+                        hostname=sysinfo.hostname(),
+                        printers=inv,
+                    )
+                except Exception:
+                    log.debug("wait-tick cable refresh failed", exc_info=True)
+
+        # Always REST-heartbeat on the normal schedule while blocked on CUPS.
         if client is not None and device_token:
-            try:
-                client.heartbeat(
-                    device_token,
-                    agent_version=AGENT_VERSION,
-                    hostname=sysinfo.hostname(),
-                    printers=inv,
-                )
-            except Exception:
-                log.debug("wait-tick REST inventory failed", exc_info=True)
+            if now - last_rest["t"] >= rest_interval:
+                last_rest["t"] = now
+                try:
+                    client.heartbeat(
+                        device_token,
+                        agent_version=AGENT_VERSION,
+                        hostname=sysinfo.hostname(),
+                        printers=inv,
+                        platform=default_platform(),
+                    )
+                except Exception:
+                    log.debug("wait-tick REST heartbeat failed", exc_info=True)
 
     return tick
 
@@ -346,7 +371,10 @@ def drain_local_queue(
         ack=ack,
         report_state=report_state,
         on_wait_tick=_inventory_wait_tick(
-            cable_session, client=client, device_token=device_token
+            cable_session,
+            client=client,
+            device_token=device_token,
+            heartbeat_seconds=cfg.heartbeat_seconds,
         ),
     )
     for job_id, result in results:
@@ -389,7 +417,10 @@ def pull_and_process(
         client, device_token, cable_session=cable_session
     )
     on_wait_tick = _inventory_wait_tick(
-        cable_session, client=client, device_token=device_token
+        cable_session,
+        client=client,
+        device_token=device_token,
+        heartbeat_seconds=cfg.heartbeat_seconds,
     )
 
     for payload in payloads:
@@ -440,7 +471,10 @@ def process_job_payload(
             ack=ack,
             report_state=report_state,
             on_wait_tick=_inventory_wait_tick(
-                cable_session, client=client, device_token=device_token
+                cable_session,
+                client=client,
+                device_token=device_token,
+                heartbeat_seconds=cfg.heartbeat_seconds,
             ),
         )
     except JobError as e:
