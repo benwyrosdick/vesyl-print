@@ -215,7 +215,7 @@ class InfoScreen:
             ("ORGANIZATION", org),
             ("WAREHOUSE", wh),
             ("IP ADDRESS", sysinfo.primary_ip()),
-            ("CPU TEMP", sysinfo.cpu_temp_c()),
+            ("TAILSCALE", sysinfo.tailscale_ip()),
         ]
         for i, (label, value) in enumerate(rows):
             self._row(d, label, value, y=y + i * row_pitch)

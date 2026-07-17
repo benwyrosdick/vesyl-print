@@ -34,6 +34,26 @@ def primary_ip() -> str:
     return addrs[0] if addrs else "no network"
 
 
+def tailscale_ip() -> str:
+    """Tailscale IPv4 (``tailscale ip -4``), or a short fallback if unavailable."""
+    try:
+        out = subprocess.run(
+            ["tailscale", "ip", "-4"],
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return "n/a"
+    if out.returncode != 0:
+        return "n/a"
+    for line in (out.stdout or "").splitlines():
+        ip = line.strip()
+        if ip and ":" not in ip:
+            return ip
+    return "n/a"
+
+
 def cpu_temp_c() -> str:
     """CPU temperature in °C, or a short fallback if unavailable.
 

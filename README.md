@@ -6,7 +6,7 @@ Raspberry Pi **print node** for VESYL: LCD status display, CUPS printer discover
 
 | Component | Role |
 |-----------|------|
-| **LCD** (`main.py` / `vesyl-print-display.service`) | Clock, IP, CPU temp, CUPS printers, cloud pairing, agent version, OTA progress |
+| **LCD** (`main.py` / `vesyl-print-display.service`) | Clock, LAN IP, Tailscale IP, CUPS printers, cloud pairing, agent version, OTA progress |
 | **Agent** (`agent.py` / `vesyl-print-agent.service`) | Heartbeats + `whoami`; writes status for the LCD |
 | **CLI** (`vesyl-print`) | `claim`, `enroll`, `status`, `unpair` |
 
