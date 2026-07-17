@@ -568,27 +568,36 @@ def rollback(
 
 
 def restart_services(helper: Path | None = None) -> None:
-    """Restart display + agent via apply-update helper or systemctl."""
-    if helper and helper.is_file():
-        subprocess.run(
-            ["sudo", "-n", str(helper), "restart"],
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=60,
-        )
-        return
-    for unit in ("vesyl-print-agent", "vesyl-print-display"):
-        try:
-            subprocess.run(
-                ["systemctl", "restart", unit],
-                check=False,
-                capture_output=True,
-                text=True,
-                timeout=30,
+    """Restart display + agent via apply-update helper or systemctl.
+
+    Best-effort and non-blocking: when the agent restarts *itself*, systemd
+    SIGTERMs this process while it is still waiting on ``sudo apply-update
+    restart``. Detach so the helper can finish after we die, and never treat
+    that self-stop as an OTA failure.
+    """
+    try:
+        if helper and helper.is_file():
+            subprocess.Popen(
+                ["sudo", "-n", str(helper), "restart"],
+                start_new_session=True,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
             )
-        except (OSError, subprocess.SubprocessError) as e:
-            log.warning("restart %s failed: %s", unit, e)
+            return
+        for unit in ("vesyl-print-agent", "vesyl-print-display"):
+            try:
+                subprocess.Popen(
+                    ["systemctl", "restart", "--no-block", unit],
+                    start_new_session=True,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+            except (OSError, subprocess.SubprocessError) as e:
+                log.warning("restart %s failed: %s", unit, e)
+    except Exception as e:
+        log.warning("restart_services: %s", e)
 
 
 def apply_release(
@@ -754,6 +763,42 @@ def _deadline_passed(deadline_iso: str | None, now_iso: str | None = None) -> bo
         return False
 
 
+def recover_false_update_failure(
+    st: UpdateStatus,
+    *,
+    cfg: Any,
+    install_root: Path | None = None,
+) -> UpdateStatus:
+    """If OTA activated successfully but status was marked failed (e.g. SIGTERM
+    during self-restart), promote back to ``pending_health`` so the gate runs.
+
+    Condition: status=failed, target matches running package, local slot OK.
+    """
+    if st.status != STATUS_FAILED:
+        return st
+    target = (st.target_version or "").strip()
+    if not target:
+        return st
+    running = package_version()
+    if version_cmp(running, target) != 0:
+        return st
+    root = Path(install_root) if install_root else resolve_install_root(cfg)
+    ok, _err = local_slot_healthy(root, target)
+    if not ok:
+        return st
+    log.info(
+        "recovering sticky failed update status for %s (slot healthy) → pending_health",
+        target,
+    )
+    return mark_pending_health(
+        st,
+        target_version=target,
+        previous_version=st.previous_version,
+        gate_seconds=health_gate_seconds(cfg),
+        channel=st.channel,
+    )
+
+
 def process_pending_health(
     st: UpdateStatus,
     *,
@@ -774,6 +819,8 @@ def process_pending_health(
     On hard failure or deadline expiry: auto-rollback to ``previous_version``
     when available, set status ``rolled_back``, and restart services.
     """
+    if st.status == STATUS_FAILED:
+        st = recover_false_update_failure(st, cfg=cfg, install_root=install_root)
     if st.status != STATUS_PENDING_HEALTH:
         return st
 
@@ -1000,7 +1047,12 @@ def maybe_update_from_heartbeat(
             manifest.version,
             st.health_deadline_at,
         )
-        restart_services(helper)
+        # Activate already succeeded. Restart may SIGTERM this process; never
+        # overwrite pending_health with failed because of that.
+        try:
+            restart_services(helper)
+        except Exception as e:
+            log.info("post-activate restart: %s (ignored if self-stop)", e)
     except UpdateError as e:
         st.status = STATUS_FAILED
         st.last_error = e.message

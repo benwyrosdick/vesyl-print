@@ -32,8 +32,10 @@ case "$cmd" in
     echo "activated $release_dir -> $current_link"
     ;;
   restart)
-    systemctl restart vesyl-print-agent.service || true
-    systemctl restart vesyl-print-display.service || true
+    # --no-block: agent calls this to restart itself; waiting would hang until
+    # SIGTERM and look like an OTA failure to the parent process.
+    systemctl restart --no-block vesyl-print-agent.service || true
+    systemctl restart --no-block vesyl-print-display.service || true
     echo "restarted services"
     ;;
   rollback)

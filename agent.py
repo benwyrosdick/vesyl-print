@@ -106,7 +106,10 @@ def run_once(
     if not creds:
         # Unpaired: still complete post-update health (local slot checks only).
         update_status = update_mod.read_update_status(cfg.update_status_path)
-        if update_status and update_status.status == update_mod.STATUS_PENDING_HEALTH:
+        if update_status and update_status.status in (
+            update_mod.STATUS_PENDING_HEALTH,
+            update_mod.STATUS_FAILED,
+        ):
             try:
                 update_status = update_mod.process_pending_health(
                     update_status,
@@ -140,7 +143,10 @@ def run_once(
             whoami_result = "unauthorized"
             # Still run health gate (API reached) before clearing credentials.
             update_status = update_mod.read_update_status(cfg.update_status_path)
-            if update_status and update_status.status == update_mod.STATUS_PENDING_HEALTH:
+            if update_status and update_status.status in (
+                update_mod.STATUS_PENDING_HEALTH,
+                update_mod.STATUS_FAILED,
+            ):
                 try:
                     ust = update_mod.process_pending_health(
                         update_status,
@@ -164,9 +170,12 @@ def run_once(
         log.warning("whoami failed: %s", e)
 
     # Post-update health gate: declare OTA success only after whoami (or local
-    # checks if unpaired). Auto-rollback if the new slot is unhealthy.
+    # checks if unpaired). Also recover sticky "failed" after self-restart SIGTERM.
     update_status = update_mod.read_update_status(cfg.update_status_path)
-    if update_status and update_status.status == update_mod.STATUS_PENDING_HEALTH:
+    if update_status and update_status.status in (
+        update_mod.STATUS_PENDING_HEALTH,
+        update_mod.STATUS_FAILED,
+    ):
         try:
             update_status = update_mod.process_pending_health(
                 update_status,

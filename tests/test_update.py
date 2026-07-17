@@ -421,6 +421,44 @@ class TestHealthGate(unittest.TestCase):
         self.assertIsNotNone(st.health_deadline_at)
         self.assertEqual(st.channel, "stable")
 
+    def test_recover_false_failed_then_health_ok(self):
+        """Sticky failed after self-restart SIGTERM → recover → idle on whoami."""
+        with tempfile.TemporaryDirectory() as td:
+            td_path = Path(td)
+            install_root = self._two_slots(td_path)
+            cfg = Config(
+                api_base_url="https://example.test",
+                state_dir=td_path / "state",
+            )
+            st = update_mod.UpdateStatus(
+                status=update_mod.STATUS_FAILED,
+                current_version="0.4.0",
+                target_version="0.4.0",
+                previous_version="0.3.0",
+                last_error="died with <Signals.SIGTERM: 15>",
+            )
+            with mock.patch.object(update_mod, "package_version", return_value="0.4.0"):
+                out = update_mod.process_pending_health(
+                    st,
+                    cfg=cfg,
+                    whoami_result="ok",
+                    install_root=install_root,
+                    restart_on_rollback=False,
+                )
+            self.assertEqual(out.status, update_mod.STATUS_IDLE)
+            self.assertIsNone(out.last_error)
+            self.assertEqual((install_root / "current").resolve().name, "0.4.0")
+
+    def test_restart_services_detaches(self):
+        with mock.patch("subprocess.Popen") as popen:
+            helper = Path("/usr/local/lib/vesyl-print/apply-update")
+            with mock.patch.object(Path, "is_file", return_value=True):
+                update_mod.restart_services(helper)
+            popen.assert_called_once()
+            args, kwargs = popen.call_args
+            self.assertEqual(args[0][0:3], ["sudo", "-n", str(helper)])
+            self.assertTrue(kwargs.get("start_new_session"))
+
 
 class TestJobPauseAndDefer(unittest.TestCase):
     def test_should_pause_jobs_statuses(self):

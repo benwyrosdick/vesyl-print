@@ -422,6 +422,7 @@ keep app OTA as the daily driver.
 | Disk full | Fail before extract; report error |
 | Activate succeeds, whoami never succeeds | Auto-rollback after `update_health_gate_seconds` (default 120) |
 | Activate succeeds, slot missing entrypoints | Immediate auto-rollback (hard local fail) |
+| Agent self-restart SIGTERM during `apply-update restart` | **Not** a failure — restart is detached/`--no-block`; sticky false `failed` is recovered when version matches target |
 | Agent crash-loops before health gate runs | No process to roll back; support: `vesyl-print update rollback --restart` |
 | Server omits desired version | No update attempt |
 | `auto_update_enabled: false` | Log desired only; support can apply via CLI on-site |
