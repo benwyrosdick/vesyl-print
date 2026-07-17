@@ -1,4 +1,6 @@
-# Update signing keys
+# Device keys (OTA + Tailscale)
+
+## OTA signing
 
 **Public key** (committed, shipped on devices):
 
@@ -8,6 +10,31 @@ keys/update_public.pem
 
 **Private key** (never commit): store as GitHub Actions secret **`UPDATE_PRIVATE_KEY`**
 (full PEM, including `BEGIN`/`END` lines). Used by `.github/workflows/release.yml`.
+
+## Tailscale auth key (factory)
+
+```
+keys/tailscale.key
+```
+
+- **Never commit** (gitignored). Used only by `setup.sh` on first provision.
+- Contents: a **one-time** Tailscale auth key (single line).
+- `setup.sh` installs Tailscale (if needed) and runs:
+
+```bash
+tailscale up \
+  --hostname="$(hostname)" \
+  --auth-key="$(cat keys/tailscale.key)"
+```
+
+- On **successful** join, `setup.sh` **deletes** the key file (one-time use).
+  On failure the file is left so you can retry.
+- After a full factory setup succeeds, `setup.sh` also **removes the entire
+  source checkout** used to provision (app runs from `/opt/vesyl-print/current`).
+  Lab: `SKIP_SOURCE_CLEANUP=1 sudo ./setup.sh`.
+- Not copied into `/opt/vesyl-print/releases/*` (OTA slots).
+- Skip Tailscale: `SKIP_TAILSCALE=1 sudo ./setup.sh`
+- Override path: `TAILSCALE_AUTH_KEY_FILE=/path/to.key`
 
 ## Generate a new key pair
 

@@ -67,6 +67,10 @@ rsync -a \
   --exclude='credentials.json' \
   --exclude='lcd-screenshot.png' \
   --exclude='.gitignore' \
+  --exclude='keys/update_private.pem' \
+  --exclude='**/update_private.pem' \
+  --exclude='keys/tailscale.key' \
+  --exclude='**/tailscale.key' \
   "$REPO_ROOT/" "$STAGE_TREE/"
 
 # Ensure VERSION matches release

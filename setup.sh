@@ -11,13 +11,18 @@
 #   5. installs the app into /opt/vesyl-print/releases/<ver> + current symlink,
 #   6. installs the OTA apply-update helper + sudoers drop-in,
 #   7. installs and enables the LCD + cloud agent systemd services,
-#   8. installs the vesyl-print CLI wrapper (points at current).
+#   8. installs the vesyl-print CLI wrapper (points at current),
+#   9. installs Tailscale and joins the tailnet (auth key from keys/tailscale.key),
+#  10. removes the source checkout used for factory setup (app runs from /opt).
 #
 # Usage:  sudo ./setup.sh
 #
 # Optional env:
 #   INSTALL_ROOT=/opt/vesyl-print   # dual-slot root (default)
 #   SKIP_APP_INSTALL=1              # only deps/config/units; don't rsync app tree
+#   SKIP_TAILSCALE=1                # skip Tailscale install / join
+#   TAILSCALE_AUTH_KEY_FILE=...     # override path to auth key (default: keys/tailscale.key)
+#   SKIP_SOURCE_CLEANUP=1           # keep source tree after install (lab/dev)
 #
 set -euo pipefail
 
@@ -200,9 +205,11 @@ else
             --exclude='lcd-screenshot.png' \
             --exclude='keys/update_private.pem' \
             --exclude='**/update_private.pem' \
+            --exclude='keys/tailscale.key' \
+            --exclude='**/tailscale.key' \
             "$REPO_DIR/" "$RELEASE_DIR/"
     else
-        # Fallback without rsync (still excludes .git / private key)
+        # Fallback without rsync (still excludes .git / secrets)
         find "$RELEASE_DIR" -mindepth 1 -maxdepth 1 -exec rm -rf {} +
         tar -C "$REPO_DIR" \
             --exclude='.git' \
@@ -210,6 +217,7 @@ else
             --exclude='tests' \
             --exclude='dist' \
             --exclude='keys/update_private.pem' \
+            --exclude='keys/tailscale.key' \
             -cf - . | tar -C "$RELEASE_DIR" -xf -
     fi
 
@@ -360,12 +368,68 @@ fi
 systemctl enable "$DISPLAY_SERVICE"
 systemctl enable "$AGENT_SERVICE"
 
+# --- 9. Tailscale (optional auth key) --------------------------------------
+# Auth key is factory-only: never copied into /opt release slots (rsync excludes it).
+if [[ "${SKIP_TAILSCALE:-}" == "1" ]]; then
+    echo "==> SKIP_TAILSCALE=1 — not installing/joining Tailscale"
+else
+    TS_KEY_FILE="${TAILSCALE_AUTH_KEY_FILE:-$REPO_DIR/keys/tailscale.key}"
+
+    if [[ ! -f "$TS_KEY_FILE" ]]; then
+        echo "==> No Tailscale auth key ($TS_KEY_FILE) — skip Tailscale"
+    else
+        echo "==> Tailscale: ensure installed"
+        if ! command -v tailscale >/dev/null 2>&1; then
+            # Official installer works on Raspberry Pi OS / Debian aarch64.
+            if ! command -v curl >/dev/null 2>&1; then
+                apt-get install -y curl || true
+            fi
+            curl -fsSL https://tailscale.com/install.sh | sh
+        else
+            echo "   tailscale already present: $(command -v tailscale)"
+        fi
+
+        if ! command -v tailscale >/dev/null 2>&1; then
+            echo "   WARNING: tailscale install failed — skip join" >&2
+        else
+            # Idempotent: already logged in → leave alone.
+            if tailscale status >/dev/null 2>&1; then
+                echo "   Tailscale already joined — skip tailscale up"
+                tailscale status 2>/dev/null | head -5 || true
+            else
+                echo "==> Tailscale: joining network (hostname=$(hostname))"
+                # Read key without printing it; strip whitespace/newlines.
+                AUTHKEY="$(tr -d '[:space:]' <"$TS_KEY_FILE")"
+                if [[ -z "$AUTHKEY" ]]; then
+                    echo "   WARNING: $TS_KEY_FILE is empty — skip tailscale up" >&2
+                else
+                    if tailscale up \
+                        --hostname="$(hostname)" \
+                        --auth-key="$AUTHKEY"; then
+                        echo "   Tailscale up OK"
+                        tailscale status 2>/dev/null | head -8 || true
+                        # One-time auth keys: delete only after successful join.
+                        rm -f "$TS_KEY_FILE"
+                        echo "   removed one-time auth key: $TS_KEY_FILE"
+                    else
+                        echo "   WARNING: tailscale up failed (auth key left in place for retry)" >&2
+                    fi
+                fi
+                unset AUTHKEY
+            fi
+        fi
+    fi
+fi
+
 echo
 echo "==> Done."
 echo "   App:      $INSTALL_ROOT/current → $(readlink -f "$CURRENT_LINK" 2>/dev/null || echo "$CURRENT_LINK")"
 echo "   Services: $DISPLAY_SERVICE, $AGENT_SERVICE"
 echo "   CLI:      $CLI_PATH"
 echo "   OTA:      $APPLY_UPDATE (+ $SUDOERS_DROPIN)"
+if command -v tailscale >/dev/null 2>&1; then
+    echo "   Tailscale: $(tailscale ip -4 2>/dev/null || echo 'installed')"
+fi
 echo "   Pair:     vesyl-print claim <CODE>"
 echo "   Status:   vesyl-print status --check"
 if [[ -e /dev/fb1 ]]; then
@@ -376,4 +440,46 @@ else
     echo "   /dev/fb1 not present yet — REBOOT to load the display driver:"
     echo "     sudo reboot"
     systemctl restart "$AGENT_SERVICE" || true
+fi
+
+# --- 10. Remove factory source tree ----------------------------------------
+# App + CLI run from /opt/vesyl-print/current. The checkout used for setup
+# (often ~/vesyl-print) holds one-time secrets (Tailscale key) and is not needed.
+if [[ "${SKIP_SOURCE_CLEANUP:-}" == "1" ]]; then
+    echo "==> SKIP_SOURCE_CLEANUP=1 — keeping source tree $REPO_DIR"
+elif [[ "${SKIP_APP_INSTALL:-}" == "1" ]]; then
+    echo "==> SKIP_APP_INSTALL=1 — not removing source tree"
+else
+    REPO_RESOLVED="$(readlink -f "$REPO_DIR" 2>/dev/null || echo "$REPO_DIR")"
+    INSTALL_RESOLVED="$(readlink -f "$INSTALL_ROOT" 2>/dev/null || echo "$INSTALL_ROOT")"
+    CURRENT_RESOLVED="$(readlink -f "$CURRENT_LINK" 2>/dev/null || true)"
+
+    safe_to_remove=1
+    if [[ ! -e "$CURRENT_LINK/agent.py" && ! -e "$CURRENT_LINK/main.py" ]]; then
+        echo "==> Source cleanup skipped: $CURRENT_LINK incomplete"
+        safe_to_remove=0
+    fi
+    # Never delete the live install tree or anything under it.
+    if [[ $safe_to_remove -eq 1 ]]; then
+        if [[ "$REPO_RESOLVED" == "$INSTALL_RESOLVED" || "$REPO_RESOLVED" == "$INSTALL_RESOLVED"/* ]]; then
+            echo "==> Source cleanup skipped: source is under install root ($REPO_RESOLVED)"
+            safe_to_remove=0
+        elif [[ -n "$CURRENT_RESOLVED" && ( "$REPO_RESOLVED" == "$CURRENT_RESOLVED" || "$REPO_RESOLVED" == "$CURRENT_RESOLVED"/* ) ]]; then
+            echo "==> Source cleanup skipped: source is the active slot ($REPO_RESOLVED)"
+            safe_to_remove=0
+        elif [[ -z "$REPO_RESOLVED" || "$REPO_RESOLVED" == "/" || "$REPO_RESOLVED" == "/home" || "$REPO_RESOLVED" == "/root" || "$REPO_RESOLVED" == "/opt" ]]; then
+            echo "==> Source cleanup skipped: refusing path $REPO_RESOLVED"
+            safe_to_remove=0
+        elif [[ ! -f "$REPO_RESOLVED/setup.sh" || ! -f "$REPO_RESOLVED/VERSION" ]]; then
+            echo "==> Source cleanup skipped: $REPO_RESOLVED does not look like vesyl-print source"
+            safe_to_remove=0
+        fi
+    fi
+
+    if [[ $safe_to_remove -eq 1 ]]; then
+        echo "==> Removing factory source tree: $REPO_RESOLVED"
+        # After this, only /opt/vesyl-print/current remains for the app.
+        rm -rf "$REPO_RESOLVED"
+        echo "   source tree removed (runtime is $INSTALL_ROOT/current)"
+    fi
 fi
