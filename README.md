@@ -293,9 +293,10 @@ http://10.0.0.28:8765/
 
 | URL | Purpose |
 |-----|---------|
-| `/` | Full-page live view |
+| `/` | LCD at top + live stats tables (pairing, system, printers, jobs, OTA) |
 | `/stream.mjpg` | Raw MJPEG |
 | `/snapshot.jpg` | Single frame |
+| `/api/stats` | JSON snapshot of the same stats (polls ~2s cache) |
 
 Options on `main.py` / the unit’s `ExecStart`:
 

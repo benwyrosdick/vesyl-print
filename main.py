@@ -716,12 +716,28 @@ def main() -> None:
 
     streamer: LcdStreamServer | None = None
     if args.stream:
+
+        def _stream_stats():
+            from stream_lcd import collect_stats
+
+            return collect_stats(
+                status_path=cfg.status_path,
+                update_status_path=cfg.update_status_path,
+                queue_dir=cfg.queue_dir,
+                processed_dir=cfg.processed_dir,
+                credentials_path=cfg.credentials_path,
+                config_dir=cfg.config_dir,
+                state_dir=cfg.state_dir,
+                api_base_url=cfg.api_base_url,
+            )
+
         streamer = LcdStreamServer(
             port=args.stream_port,
             fps=args.stream_fps,
             scale=args.stream_scale,
             quality=args.stream_quality,
             native_size=fb.size,
+            stats_collector=_stream_stats,
         )
         streamer.start()
 
