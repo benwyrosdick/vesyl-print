@@ -293,10 +293,16 @@ http://10.0.0.28:8765/
 
 | URL | Purpose |
 |-----|---------|
-| `/` | LCD at top + live stats tables (pairing, system, printers, jobs, OTA) |
+| `/` | LCD at top + claim form (when unpaired) + live stats tables |
 | `/stream.mjpg` | Raw MJPEG |
 | `/snapshot.jpg` | Single frame |
 | `/api/stats` | JSON snapshot of the same stats (polls ~2s cache) |
+| `/api/claim` | `POST {{"code":"AB7K2Q9M","name":"optional"}}` — pair node (trusted LAN) |
+
+When the node is **unpaired** or **revoked**, the page shows a VESYL-branded claim
+form: **8 large character boxes** with a dash between the two groups of four.
+Typing auto-advances; paste fills all boxes and **ignores dashes/spaces**.
+Optional node name field. Same pairing path as `vesyl-print claim`.
 
 Options on `main.py` / the unit’s `ExecStart`:
 

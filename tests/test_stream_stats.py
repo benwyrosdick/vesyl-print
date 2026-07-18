@@ -6,6 +6,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 import stream_lcd
@@ -39,9 +40,9 @@ class CollectStatsTests(unittest.TestCase):
             (p / "old.json").write_text("{}", encoding="utf-8")
             (p / "older.json").write_text("{}", encoding="utf-8")
 
-            with mock.patch("stream_lcd.collect_stats", wraps=stream_lcd.collect_stats):
-                # Patch inventory to avoid CUPS
-                with mock.patch("printers.inventory_payload", return_value=[
+            with mock.patch(
+                "printers.inventory_payload",
+                return_value=[
                     {
                         "cups_name": "Zebra_ZD",
                         "display_name": "Zebra ZD421",
@@ -49,19 +50,21 @@ class CollectStatsTests(unittest.TestCase):
                         "status_message": None,
                         "uri": "ipp://1.2.3.4/ipp/print",
                     }
-                ]):
-                    data = stream_lcd.collect_stats(
-                        status_path=status,
-                        queue_dir=q,
-                        processed_dir=p,
-                        credentials_path=root / "credentials.json",
-                        config_dir=root / "etc",
-                        state_dir=root,
-                        api_base_url="https://example.test",
-                        include_printers=True,
-                    )
+                ],
+            ):
+                data = stream_lcd.collect_stats(
+                    status_path=status,
+                    queue_dir=q,
+                    processed_dir=p,
+                    credentials_path=root / "credentials.json",
+                    config_dir=root / "etc",
+                    state_dir=root,
+                    api_base_url="https://example.test",
+                    include_printers=True,
+                )
 
             self.assertEqual(data["pairing"]["pairing"], "paired")
+            self.assertFalse(data["pairing"]["needs_claim"])
             self.assertEqual(data["pairing"]["cloud"], "online")
             self.assertEqual(data["pairing"]["name"], "pack-01")
             self.assertEqual(data["pairing"]["organization_name"], "Acme")
@@ -81,6 +84,7 @@ class CollectStatsTests(unittest.TestCase):
                 include_printers=False,
             )
         self.assertEqual(data["pairing"]["pairing"], "unpaired")
+        self.assertTrue(data["pairing"]["needs_claim"])
         self.assertEqual(data["jobs"]["queued"], 0)
         self.assertEqual(data["printers"], [])
 
@@ -89,8 +93,15 @@ class CollectStatsTests(unittest.TestCase):
 
         def coll():
             calls["n"] += 1
-            return {"n": calls["n"], "pairing": {}, "system": {}, "jobs": {},
-                    "printers": [], "update": {}, "paths": {}}
+            return {
+                "n": calls["n"],
+                "pairing": {},
+                "system": {},
+                "jobs": {},
+                "printers": [],
+                "update": {},
+                "paths": {},
+            }
 
         sp = stream_lcd.StatsProvider(coll, cache_s=60.0)
         a = sp.get()
@@ -98,13 +109,91 @@ class CollectStatsTests(unittest.TestCase):
         self.assertEqual(a["n"], 1)
         self.assertEqual(b["n"], 1)
         self.assertEqual(calls["n"], 1)
+        sp.invalidate()
+        c = sp.get()
+        self.assertEqual(c["n"], 2)
 
-    def test_html_contains_top_layout_and_stats(self):
-        # Sanity: page template is top-aligned and wires /api/stats
+    def test_html_contains_claim_form_and_layout(self):
+        # Page column is top-aligned (stretch), not vertically centered.
         self.assertIn("align-items: stretch", stream_lcd.HTML_PAGE)
-        self.assertNotIn("justify-content: center", stream_lcd.HTML_PAGE)
+        self.assertIn(".page {{", stream_lcd.HTML_PAGE)
         self.assertIn("/api/stats", stream_lcd.HTML_PAGE)
-        self.assertIn("id=\"stats\"", stream_lcd.HTML_PAGE)
+        self.assertIn("/api/claim", stream_lcd.HTML_PAGE)
+        self.assertIn("id=\"claim-panel\"", stream_lcd.HTML_PAGE)
+        self.assertIn("code-box", stream_lcd.HTML_PAGE)
+        self.assertIn("code-dash", stream_lcd.HTML_PAGE)
+        self.assertIn("normalizePasted", stream_lcd.HTML_PAGE)
+        self.assertIn("/assets/logo.svg", stream_lcd.HTML_PAGE)
+
+
+class ClaimCodeTests(unittest.TestCase):
+    def test_normalize_strips_dashes_and_spaces(self):
+        self.assertEqual(
+            stream_lcd.normalize_claim_code("ab7k-2q9m"),
+            "AB7K2Q9M",
+        )
+        self.assertEqual(
+            stream_lcd.normalize_claim_code(" ab 7k - 2q 9m "),
+            "AB7K2Q9M",
+        )
+        self.assertEqual(stream_lcd.normalize_claim_code(None), "")
+
+    def test_claim_rejects_wrong_length(self):
+        with self.assertRaises(stream_lcd.ClaimError) as cm:
+            stream_lcd.claim_device("ABC")
+        self.assertEqual(cm.exception.status, 400)
+
+    def test_claim_success_saves_and_returns_public_fields(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            cfg = SimpleNamespace(
+                api_base_url="https://example.test",
+                config_path=root / "config.json",
+                credentials_path=root / "credentials.json",
+                status_path=root / "status.json",
+                config_dir=root,
+                state_dir=root,
+                ensure_dirs=lambda: None,
+            )
+            pair_resp = {
+                "device_token": "secret-token-do-not-return",
+                "node_id": "node-1",
+                "name": "Pack 1",
+                "organization_name": "Acme",
+                "warehouse_name": "North",
+            }
+            fake_creds = SimpleNamespace(
+                node_id="node-1",
+                name="Pack 1",
+                organization_name="Acme",
+                warehouse_label=lambda: "North",
+            )
+
+            with mock.patch("auth.load_credentials", return_value=None), mock.patch(
+                "auth.credentials_from_pair_response", return_value=fake_creds
+            ), mock.patch("auth.save_credentials") as save, mock.patch(
+                "statusio.write_status"
+            ) as write_st, mock.patch(
+                "config.write_default_config"
+            ), mock.patch(
+                "cloud.CloudClient"
+            ) as Client, mock.patch(
+                "sysinfo.hostname", return_value="pi-test"
+            ):
+                Client.return_value.claim.return_value = pair_resp
+                out = stream_lcd.claim_device(
+                    "ab7k-2q9m", name="Pack 1", cfg=cfg
+                )
+
+            self.assertTrue(out["ok"])
+            self.assertEqual(out["node_id"], "node-1")
+            self.assertEqual(out["warehouse_name"], "North")
+            self.assertNotIn("device_token", out)
+            Client.return_value.claim.assert_called_once()
+            call_kw = Client.return_value.claim.call_args
+            self.assertEqual(call_kw[0][0], "AB7K2Q9M")
+            save.assert_called_once()
+            write_st.assert_called_once()
 
 
 if __name__ == "__main__":

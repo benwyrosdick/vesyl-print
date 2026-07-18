@@ -43,6 +43,9 @@ DEFAULT_FPS = 2.0
 DEFAULT_SCALE = 1.0
 DEFAULT_QUALITY = 80
 _STATS_CACHE_S = 2.0
+_CLAIM_CODE_LEN = 8
+_BASE_DIR = Path(__file__).resolve().parent
+_ASSETS_DIR = _BASE_DIR / "assets"
 
 HTML_PAGE = """\
 <!DOCTYPE html>
@@ -105,6 +108,147 @@ HTML_PAGE = """\
       width: {w}px;
       height: auto;
       background: #000;
+    }}
+    .claim-panel {{
+      background: linear-gradient(180deg, #1a1e28 0%, var(--panel) 100%);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 28px 24px 24px;
+      text-align: center;
+      box-shadow: 0 12px 40px rgba(0,0,0,0.35);
+    }}
+    .claim-panel[hidden] {{ display: none !important; }}
+    .claim-logo {{
+      height: 36px; width: auto; margin: 0 auto 18px; display: block;
+    }}
+    .claim-panel h2 {{
+      margin: 0 0 6px;
+      font-size: 22px;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+      color: var(--fg);
+    }}
+    .claim-panel .sub {{
+      margin: 0 0 22px;
+      font-size: 14px;
+      color: var(--muted);
+      line-height: 1.45;
+    }}
+    .claim-panel .sub strong {{ color: var(--accent); font-weight: 600; }}
+    .code-row {{
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin: 0 auto 18px;
+    }}
+    .code-group {{
+      display: flex;
+      gap: 8px;
+    }}
+    .code-dash {{
+      width: 14px;
+      height: 3px;
+      background: var(--accent);
+      border-radius: 2px;
+      margin: 0 4px;
+      flex-shrink: 0;
+    }}
+    .code-box {{
+      width: 52px;
+      height: 64px;
+      border: 2px solid var(--border);
+      border-radius: 10px;
+      background: #0c0e14;
+      color: var(--fg);
+      font-size: 28px;
+      font-weight: 700;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      text-align: center;
+      text-transform: uppercase;
+      caret-color: var(--accent);
+      outline: none;
+      transition: border-color 0.15s, box-shadow 0.15s;
+    }}
+    .code-box:focus {{
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px rgba(237, 252, 51, 0.18);
+    }}
+    .code-box:disabled {{
+      opacity: 0.55;
+    }}
+    .claim-name {{
+      display: flex;
+      flex-direction: column;
+      align-items: stretch;
+      gap: 6px;
+      max-width: 360px;
+      margin: 0 auto 16px;
+      text-align: left;
+    }}
+    .claim-name label {{
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      color: var(--muted);
+    }}
+    .claim-name input {{
+      height: 40px;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      background: #0c0e14;
+      color: var(--fg);
+      padding: 0 12px;
+      font-size: 14px;
+      outline: none;
+    }}
+    .claim-name input:focus {{
+      border-color: var(--accent);
+    }}
+    .claim-actions {{
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 10px;
+    }}
+    .btn-claim {{
+      appearance: none;
+      border: none;
+      cursor: pointer;
+      background: var(--accent);
+      color: #101218;
+      font-weight: 700;
+      font-size: 15px;
+      letter-spacing: 0.02em;
+      padding: 12px 28px;
+      border-radius: 10px;
+      min-width: 200px;
+      transition: filter 0.15s, transform 0.1s;
+    }}
+    .btn-claim:hover:not(:disabled) {{ filter: brightness(1.05); }}
+    .btn-claim:active:not(:disabled) {{ transform: scale(0.98); }}
+    .btn-claim:disabled {{
+      opacity: 0.55;
+      cursor: not-allowed;
+    }}
+    .claim-msg {{
+      min-height: 1.25em;
+      font-size: 13px;
+      margin: 0;
+    }}
+    .claim-msg.err {{ color: var(--down); }}
+    .claim-msg.ok {{ color: var(--ok); }}
+    .claim-host {{
+      margin-top: 16px;
+      font-size: 12px;
+      color: var(--muted);
+      font-variant-numeric: tabular-nums;
+    }}
+    @media (max-width: 520px) {{
+      .code-box {{ width: 40px; height: 52px; font-size: 22px; }}
+      .code-dash {{ margin: 0 2px; }}
     }}
     .stats {{
       display: grid;
@@ -181,6 +325,51 @@ HTML_PAGE = """\
     <div class="lcd-wrap">
       <img src="/stream.mjpg" alt="LCD stream" width="{w}" height="{h}"/>
     </div>
+
+    <section class="claim-panel" id="claim-panel" hidden>
+      <img class="claim-logo" src="/assets/logo.svg" alt="VESYL"/>
+      <h2 id="claim-title">Claim this print node</h2>
+      <p class="sub" id="claim-sub">
+        Enter the <strong>8-character</strong> code from the warehouse admin.
+        Paste is supported (dashes optional).
+      </p>
+      <form id="claim-form" autocomplete="off" spellcheck="false">
+        <div class="code-row" id="code-row" role="group" aria-label="Claim code">
+          <div class="code-group">
+            <input class="code-box" type="text" inputmode="text" maxlength="1"
+                   aria-label="Character 1" data-i="0"/>
+            <input class="code-box" type="text" inputmode="text" maxlength="1"
+                   aria-label="Character 2" data-i="1"/>
+            <input class="code-box" type="text" inputmode="text" maxlength="1"
+                   aria-label="Character 3" data-i="2"/>
+            <input class="code-box" type="text" inputmode="text" maxlength="1"
+                   aria-label="Character 4" data-i="3"/>
+          </div>
+          <div class="code-dash" aria-hidden="true"></div>
+          <div class="code-group">
+            <input class="code-box" type="text" inputmode="text" maxlength="1"
+                   aria-label="Character 5" data-i="4"/>
+            <input class="code-box" type="text" inputmode="text" maxlength="1"
+                   aria-label="Character 6" data-i="5"/>
+            <input class="code-box" type="text" inputmode="text" maxlength="1"
+                   aria-label="Character 7" data-i="6"/>
+            <input class="code-box" type="text" inputmode="text" maxlength="1"
+                   aria-label="Character 8" data-i="7"/>
+          </div>
+        </div>
+        <div class="claim-name">
+          <label for="claim-name">Node name (optional)</label>
+          <input id="claim-name" type="text" maxlength="80"
+                 placeholder="e.g. Pack station 1" autocomplete="off"/>
+        </div>
+        <div class="claim-actions">
+          <button type="submit" class="btn-claim" id="claim-btn">Claim device</button>
+          <p class="claim-msg" id="claim-msg" role="status"></p>
+        </div>
+      </form>
+      <p class="claim-host" id="claim-host"></p>
+    </section>
+
     <div class="stats" id="stats">
       <p class="empty">Loading stats…</p>
     </div>
@@ -192,6 +381,15 @@ HTML_PAGE = """\
   <script>
     const root = document.getElementById('stats');
     const refreshed = document.getElementById('refreshed');
+    const claimPanel = document.getElementById('claim-panel');
+    const claimForm = document.getElementById('claim-form');
+    const claimBtn = document.getElementById('claim-btn');
+    const claimMsg = document.getElementById('claim-msg');
+    const claimHost = document.getElementById('claim-host');
+    const claimTitle = document.getElementById('claim-title');
+    const claimSub = document.getElementById('claim-sub');
+    const boxes = Array.from(document.querySelectorAll('.code-box'));
+    let claiming = false;
 
     function esc(s) {{
       if (s == null || s === '') return '—';
@@ -237,7 +435,157 @@ HTML_PAGE = """\
       return 'muted';
     }}
 
+    function needsClaim(data) {{
+      const p = (data && data.pairing) || {{}};
+      if (p.needs_claim === true) return true;
+      if (p.needs_claim === false) return false;
+      return p.pairing !== 'paired';
+    }}
+
+    function normalizePasted(raw) {{
+      return String(raw || '')
+        .toUpperCase()
+        .replace(/[^A-Z0-9]/g, '')
+        .slice(0, 8);
+    }}
+
+    function fillCode(chars) {{
+      const clean = normalizePasted(chars);
+      for (let i = 0; i < 8; i++) {{
+        boxes[i].value = clean[i] || '';
+      }}
+      const next = Math.min(clean.length, 7);
+      if (clean.length < 8) boxes[next].focus();
+      else boxes[7].focus();
+    }}
+
+    function readCode() {{
+      return boxes.map(b => (b.value || '').toUpperCase()).join('');
+    }}
+
+    function setClaimBusy(busy) {{
+      claiming = busy;
+      claimBtn.disabled = busy;
+      boxes.forEach(b => {{ b.disabled = busy; }});
+      const nameEl = document.getElementById('claim-name');
+      if (nameEl) nameEl.disabled = busy;
+      claimBtn.textContent = busy ? 'Claiming…' : 'Claim device';
+    }}
+
+    function showClaimMessage(text, kind) {{
+      claimMsg.textContent = text || '';
+      claimMsg.className = 'claim-msg' + (kind ? ' ' + kind : '');
+    }}
+
+    function updateClaimPanel(data) {{
+      const show = needsClaim(data);
+      claimPanel.hidden = !show;
+      if (!show) return;
+      const p = data.pairing || {{}};
+      const s = data.system || {{}};
+      if (p.pairing === 'revoked') {{
+        claimTitle.textContent = 'Re-pair this print node';
+        claimSub.innerHTML =
+          'This device was <strong>revoked</strong>. Enter a new '
+          + '<strong>8-character</strong> claim code from the warehouse admin.';
+      }} else {{
+        claimTitle.textContent = 'Claim this print node';
+        claimSub.innerHTML =
+          'Enter the <strong>8-character</strong> code from the warehouse admin. '
+          + 'Paste is supported (dashes optional).';
+      }}
+      const bits = [];
+      if (s.hostname) bits.push(s.hostname);
+      if (s.primary_ip) bits.push(s.primary_ip);
+      if (s.tailscale_ip && s.tailscale_ip !== 'n/a') bits.push('ts ' + s.tailscale_ip);
+      claimHost.textContent = bits.join(' · ');
+    }}
+
+    boxes.forEach((box, i) => {{
+      box.addEventListener('input', (e) => {{
+        let v = (box.value || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+        if (v.length > 1) {{
+          // Mobile sometimes dumps paste into one box
+          fillCode(readCode().slice(0, i) + v + readCode().slice(i + 1));
+          return;
+        }}
+        box.value = v.slice(0, 1);
+        if (box.value && i < 7) boxes[i + 1].focus();
+      }});
+      box.addEventListener('keydown', (e) => {{
+        if (e.key === 'Backspace' && !box.value && i > 0) {{
+          boxes[i - 1].focus();
+          boxes[i - 1].value = '';
+          e.preventDefault();
+        }} else if (e.key === 'ArrowLeft' && i > 0) {{
+          boxes[i - 1].focus();
+          e.preventDefault();
+        }} else if (e.key === 'ArrowRight' && i < 7) {{
+          boxes[i + 1].focus();
+          e.preventDefault();
+        }}
+      }});
+      box.addEventListener('paste', (e) => {{
+        e.preventDefault();
+        const text = (e.clipboardData || window.clipboardData).getData('text') || '';
+        fillCode(text);
+      }});
+      box.addEventListener('focus', () => {{ box.select(); }});
+    }});
+
+    // Paste anywhere on the form fills the code (ignores dashes)
+    claimForm.addEventListener('paste', (e) => {{
+      const t = e.target;
+      if (t && t.id === 'claim-name') return;
+      e.preventDefault();
+      const text = (e.clipboardData || window.clipboardData).getData('text') || '';
+      fillCode(text);
+    }});
+
+    claimForm.addEventListener('submit', async (e) => {{
+      e.preventDefault();
+      if (claiming) return;
+      const code = readCode();
+      if (code.length !== 8) {{
+        showClaimMessage('Enter all 8 characters of the claim code.', 'err');
+        boxes[Math.min(code.length, 7)].focus();
+        return;
+      }}
+      const name = (document.getElementById('claim-name').value || '').trim();
+      setClaimBusy(true);
+      showClaimMessage('Contacting VESYL…', '');
+      try {{
+        const r = await fetch('/api/claim', {{
+          method: 'POST',
+          headers: {{ 'Content-Type': 'application/json' }},
+          body: JSON.stringify({{ code, name: name || null }}),
+        }});
+        const body = await r.json().catch(() => ({{}}));
+        if (!r.ok) {{
+          throw new Error(body.error || body.message || ('HTTP ' + r.status));
+        }}
+        showClaimMessage(
+          'Paired as ' + (body.name || body.node_id || 'node')
+          + (body.warehouse_name ? ' · ' + body.warehouse_name : '')
+          + '. Waiting for agent heartbeat…',
+          'ok'
+        );
+        setTimeout(poll, 400);
+        setTimeout(poll, 2000);
+      }} catch (err) {{
+        showClaimMessage(err.message || 'Claim failed', 'err');
+        setClaimBusy(false);
+        boxes[0].focus();
+      }}
+    }});
+
     function render(data) {{
+      updateClaimPanel(data);
+      if (!needsClaim(data) && claiming) {{
+        setClaimBusy(false);
+        showClaimMessage('', '');
+      }}
+
       const p = data.pairing || {{}};
       const s = data.system || {{}};
       const j = data.jobs || {{}};
@@ -435,6 +783,97 @@ def _count_json_files(directory: Path | None) -> int:
         return 0
 
 
+def normalize_claim_code(raw: str | None) -> str:
+    """Uppercase alphanumerics only — strips dashes, spaces, and other punctuation."""
+    return "".join(c for c in (raw or "").upper() if c.isalnum())
+
+
+class ClaimError(Exception):
+    """User-facing claim failure (safe to return in HTTP JSON)."""
+
+    def __init__(self, message: str, *, status: int = 400):
+        super().__init__(message)
+        self.message = message
+        self.status = status
+
+
+def claim_device(
+    code: str,
+    *,
+    name: str | None = None,
+    cfg: Any = None,
+) -> dict[str, Any]:
+    """Pair this node with an 8-char claim code. Never returns device_token."""
+    import auth
+    import statusio
+    import sysinfo
+    from cloud import CloudClient, CloudError
+    from config import AGENT_VERSION, default_platform, load_config, write_default_config
+
+    if cfg is None:
+        cfg = load_config()
+    cfg.ensure_dirs()
+    write_default_config(cfg.config_path)
+
+    clean = normalize_claim_code(code)
+    if len(clean) != _CLAIM_CODE_LEN:
+        raise ClaimError(
+            f"Claim code must be {_CLAIM_CODE_LEN} characters "
+            f"(got {len(clean)} after removing dashes/spaces)",
+            status=400,
+        )
+
+    # Refuse if already paired with local credentials.
+    if auth.load_credentials(cfg.credentials_path) is not None:
+        st = statusio.read_status(cfg.status_path)
+        if st and st.pairing == "paired":
+            raise ClaimError("This node is already claimed", status=409)
+
+    client = CloudClient(cfg.api_base_url)
+    try:
+        data = client.claim(
+            clean,
+            hostname=sysinfo.hostname(),
+            agent_version=AGENT_VERSION,
+            platform=default_platform(),
+            name=(name.strip() if name else None) or None,
+        )
+    except CloudError as e:
+        raise ClaimError(e.message or "Claim failed", status=e.status or 502) from e
+
+    token = data.get("device_token")
+    if not token:
+        raise ClaimError("Claim response missing device_token", status=502)
+
+    creds = auth.credentials_from_pair_response(data)
+    auth.save_credentials(cfg.credentials_path, creds)
+    statusio.write_status(
+        cfg.status_path,
+        statusio.AgentStatus(
+            pairing="paired",
+            cloud="offline",
+            node_id=creds.node_id,
+            name=creds.name,
+            organization_name=creds.organization_name,
+            warehouse_name=creds.warehouse_label(),
+            agent_version=AGENT_VERSION,
+        ),
+    )
+    log.info(
+        "stream claim ok node_id=%s org=%s warehouse=%s",
+        creds.node_id,
+        creds.organization_name,
+        creds.warehouse_label(),
+    )
+    return {
+        "ok": True,
+        "node_id": creds.node_id,
+        "name": creds.name,
+        "organization_name": creds.organization_name,
+        "warehouse_name": creds.warehouse_label(),
+    }
+
+
 def collect_stats(
     *,
     status_path: Path | str | None = None,
@@ -459,8 +898,10 @@ def collect_stats(
     if status_path:
         st = statusio.read_status(Path(status_path))
 
+    pairing_state = st.pairing if st else "unpaired"
     pairing: dict[str, Any] = {
-        "pairing": st.pairing if st else "unpaired",
+        "pairing": pairing_state,
+        "needs_claim": pairing_state != "paired",
         "cloud": st.cloud if st else "unknown",
         "node_id": st.node_id if st else None,
         "name": st.name if st else None,
@@ -610,13 +1051,21 @@ class StatsProvider:
             self._cached_at = time.monotonic()
             return data
 
+    def invalidate(self) -> None:
+        with self._lock:
+            self._cached = None
+            self._cached_at = 0.0
+
 
 def make_handler(
     source: FrameSource,
     fps: float,
     stats: StatsProvider | None = None,
+    *,
+    claim_fn: Callable[..., dict[str, Any]] | None = None,
 ) -> type[BaseHTTPRequestHandler]:
     stats_provider = stats or StatsProvider(None)
+    do_claim = claim_fn or claim_device
 
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
@@ -634,10 +1083,88 @@ def make_handler(
                 self._serve_snapshot()
             elif path in ("/api/stats", "/stats.json"):
                 self._serve_stats()
+            elif path in ("/assets/logo.svg", "/logo.svg"):
+                self._serve_asset("logo.svg", "image/svg+xml")
+            elif path in ("/assets/logo.png", "/logo.png"):
+                self._serve_asset("logo.png", "image/png")
             elif path == "/health":
                 self._serve_health()
             else:
                 self.send_error(404, "not found")
+
+        def do_POST(self) -> None:  # noqa: N802
+            path = urlparse(self.path).path
+            if path in ("/api/claim", "/claim"):
+                self._serve_claim()
+            else:
+                self.send_error(404, "not found")
+
+        def _read_json_body(self, max_bytes: int = 4096) -> dict[str, Any]:
+            try:
+                length = int(self.headers.get("Content-Length") or "0")
+            except ValueError:
+                length = 0
+            if length < 0 or length > max_bytes:
+                raise ClaimError("Request body too large", status=413)
+            raw = self.rfile.read(length) if length else b""
+            if not raw:
+                return {}
+            try:
+                data = json.loads(raw.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError) as e:
+                raise ClaimError("Invalid JSON body", status=400) from e
+            if not isinstance(data, dict):
+                raise ClaimError("JSON body must be an object", status=400)
+            return data
+
+        def _json_response(self, status: int, payload: dict[str, Any]) -> None:
+            body = json.dumps(payload).encode("utf-8") + b"\n"
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(body)
+
+        def _serve_claim(self) -> None:
+            try:
+                data = self._read_json_body()
+                code = data.get("code")
+                if code is None:
+                    code = data.get("claim_code")
+                name = data.get("name")
+                if name is not None:
+                    name = str(name)
+                # Optional: accept dashed code as single string or joined digits
+                if isinstance(code, list):
+                    code = "".join(str(c) for c in code)
+                result = do_claim(str(code or ""), name=name)
+                stats_provider.invalidate()
+                self._json_response(200, result)
+            except ClaimError as e:
+                self._json_response(e.status, {"ok": False, "error": e.message})
+            except Exception:
+                log.exception("claim endpoint failed")
+                self._json_response(
+                    500, {"ok": False, "error": "Internal claim error"}
+                )
+
+        def _serve_asset(self, name: str, content_type: str) -> None:
+            path = _ASSETS_DIR / name
+            if not path.is_file():
+                self.send_error(404, "not found")
+                return
+            try:
+                data = path.read_bytes()
+            except OSError:
+                self.send_error(500, "read error")
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Cache-Control", "public, max-age=3600")
+            self.end_headers()
+            self.wfile.write(data)
 
         def _serve_html(self) -> None:
             w, h = source.size

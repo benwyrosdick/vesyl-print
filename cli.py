@@ -29,7 +29,7 @@ def cmd_claim(args: argparse.Namespace) -> int:
     cfg.ensure_dirs()
     write_default_config(cfg.config_path)
 
-    code = args.code.strip().replace("-", "").replace(" ", "")
+    code = args.code.strip().replace("-", "").replace(" ", "").upper()
     if len(code) < 6:
         _die("claim code looks too short")
 
